@@ -1,0 +1,39 @@
+{
+	"common": {
+		"success": "Thao tác thành công",
+		"not_found": "Không tìm thấy {entity}",
+		"unauthorized": "Bạn không có quyền thực hiện thao tác này",
+		"forbidden": "Truy cập bị từ chối",
+		"bad_request": "Yêu cầu không hợp lệ",
+		"internal_error": "Đã xảy ra lỗi hệ thống"
+	},
+	"auth": {
+		"sign_up_success": "Đăng ký tài khoản thành công",
+		"sign_in_success": "Đăng nhập thành công",
+		"invalid_credentials": "Email hoặc mật khẩu không đúng",
+		"email_already_exists": "Email đã tồn tại",
+		"username_already_exists": "Tên người dùng đã tồn tại",
+		"token_expired": "Token đã hết hạn",
+		"token_invalid": "Token không hợp lệ",
+		"refresh_token_invalid": "Refresh token không hợp lệ hoặc đã bị thu hồi",
+		"otp_sent": "Mã OTP đã được gửi đến email của bạn",
+		"otp_invalid": "Mã OTP không hợp lệ hoặc đã hết hạn",
+		"otp_verified": "Xác thực OTP thành công",
+		"2fa_enabled": "Xác thực hai yếu tố đã được bật",
+		"2fa_disabled": "Xác thực hai yếu tố đã được tắt"
+	},
+	"user": {
+		"created": "Tạo tài khoản thành công",
+		"updated": "Cập nhật tài khoản thành công",
+		"deleted": "Xóa tài khoản thành công",
+		"not_found": "Không tìm thấy người dùng"
+	},
+	"validation": {
+		"is_not_empty": "{field} không được để trống",
+		"is_email": "{field} phải là địa chỉ email hợp lệ",
+		"is_string": "{field} phải là chuỗi ký tự",
+		"min_length": "{field} phải có ít nhất {min} ký tự",
+		"max_length": "{field} không được vượt quá {max} ký tự",
+		"is_strong_password": "Mật khẩu không đủ mạnh"
+	}
+}

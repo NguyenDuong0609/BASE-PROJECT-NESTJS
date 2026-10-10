@@ -1,0 +1,39 @@
+{
+	"common": {
+		"success": "Operation successful",
+		"not_found": "{entity} not found",
+		"unauthorized": "You are not authorized to perform this action",
+		"forbidden": "Access denied",
+		"bad_request": "Invalid request",
+		"internal_error": "An internal server error occurred"
+	},
+	"auth": {
+		"sign_up_success": "User registered successfully",
+		"sign_in_success": "Signed in successfully",
+		"invalid_credentials": "Invalid email or password",
+		"email_already_exists": "Email already exists",
+		"username_already_exists": "Username already exists",
+		"token_expired": "Token has expired",
+		"token_invalid": "Token is invalid",
+		"refresh_token_invalid": "Refresh token is invalid or has been revoked",
+		"otp_sent": "OTP has been sent to your email",
+		"otp_invalid": "Invalid or expired OTP",
+		"otp_verified": "OTP verified successfully",
+		"2fa_enabled": "Two-factor authentication has been enabled",
+		"2fa_disabled": "Two-factor authentication has been disabled"
+	},
+	"user": {
+		"created": "User created successfully",
+		"updated": "User updated successfully",
+		"deleted": "User deleted successfully",
+		"not_found": "User not found"
+	},
+	"validation": {
+		"is_not_empty": "{field} should not be empty",
+		"is_email": "{field} must be a valid email address",
+		"is_string": "{field} must be a string",
+		"min_length": "{field} must be at least {min} characters",
+		"max_length": "{field} must not exceed {max} characters",
+		"is_strong_password": "Password is not strong enough"
+	}
+}

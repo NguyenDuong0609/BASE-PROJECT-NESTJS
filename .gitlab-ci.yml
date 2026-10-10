@@ -1,0 +1,205 @@
+﻿stages:
+  - build
+  - test
+  - package
+  - deploy
+
+variables:
+  NODE_IMAGE: node:24-alpine
+  DOCKER_IMAGE: $CI_REGISTRY_IMAGE:$CI_COMMIT_SHA
+
+cache:
+  key: ${CI_COMMIT_REF_SLUG}
+  paths:
+    - node_modules/
+    - .npm/
+
+build:
+  stage: build
+  image: $NODE_IMAGE
+  script:
+    - npm ci --cache .npm --prefer-offline
+    - npm run build
+  artifacts:
+    paths:
+      - dist/
+    expire_in: 1 hour
+  only:
+    - main
+    - develop
+    - merge_requests
+
+test:unit:
+  stage: test
+  image: $NODE_IMAGE
+  script:
+    - npm ci --cache .npm --prefer-offline
+    - npm run test -- --coverage --maxWorkers=2
+  coverage: '/All files[^|]*\|[^|]*\s+([\d\.]+)/'
+  artifacts:
+    paths:
+      - coverage/
+    expire_in: 30 days
+  only:
+    - main
+    - develop
+    - merge_requests
+
+test:e2e:
+  stage: test
+  image: $NODE_IMAGE
+  services:
+    - name: postgres:15-alpine
+      alias: postgres
+    - name: redis:7-alpine
+      alias: redis
+  variables:
+    DB_HOST: postgres
+    DB_PORT: 5432
+    DB_USERNAME: postgres
+    DB_PASSWORD: postgres
+    DB_DATABASE: app_test
+    POSTGRES_USER: postgres
+    POSTGRES_PASSWORD: postgres
+    POSTGRES_DB: app_test
+    REDIS_HOST: redis
+    REDIS_PORT: 6379
+    REDIS_PASSWORD: ''
+    NODE_ENV: test
+    PORT: 3000
+    JWT_ACCESS_TOKEN_SECRET: test-access-secret-with-at-least-thirty-two-characters
+    JWT_REFRESH_TOKEN_SECRET: test-refresh-secret-with-at-least-thirty-two-characters
+    FRONTEND_URL: http://localhost:4200
+    ENABLE_GOOGLE_OAUTH: 'false'
+    ENABLE_S3: 'false'
+    ENABLE_PGAUDIT: 'false'
+  before_script:
+    - apk add --no-cache postgresql-client redis
+  script:
+    - until pg_isready -h postgres -p 5432 -U postgres; do sleep 1; done
+    - until redis-cli -h redis ping | grep -q PONG; do sleep 1; done
+    - npm ci --cache .npm --prefer-offline
+    - npm run migration:run
+    - npm run test:e2e
+  only:
+    - main
+    - develop
+    - merge_requests
+
+lint:
+  stage: test
+  image: $NODE_IMAGE
+  dependencies:
+    - build
+  script:
+    - npm run lint
+  only:
+    - main
+    - develop
+    - merge_requests
+
+dependency:audit:
+  stage: test
+  image: $NODE_IMAGE
+  script:
+    - npm ci --cache .npm --prefer-offline
+    - npm audit --audit-level=high
+  only:
+    - main
+    - develop
+    - merge_requests
+
+docker:build:
+  stage: package
+  image: docker:24-dind
+  services:
+    - docker:24-dind
+  variables:
+    DOCKER_DRIVER: overlay2
+  before_script:
+    - echo "$CI_REGISTRY_PASSWORD" | docker login -u "$CI_REGISTRY_USER" --password-stdin "$CI_REGISTRY"
+  script:
+    - docker build --target production -t "$DOCKER_IMAGE" .
+    - docker push $DOCKER_IMAGE
+    - docker build -f docker/postgres/Dockerfile -t "$CI_REGISTRY_IMAGE/postgres:$CI_COMMIT_SHA" .
+    - docker push "$CI_REGISTRY_IMAGE/postgres:$CI_COMMIT_SHA"
+  only:
+    - main
+    - develop
+
+.deploy:
+  stage: deploy
+  image: alpine:3.22
+  before_script:
+    - apk add --no-cache openssh-client
+    - test "$CI_COMMIT_REF_PROTECTED" = "true"
+    - test -n "$DEPLOY_HOST" && test -n "$DEPLOY_USER" && test -n "$DEPLOY_PATH"
+    - test -f "$DEPLOY_SSH_PRIVATE_KEY" && test -f "$DEPLOY_SSH_KNOWN_HOSTS"
+    - |
+      case "$DEPLOY_HOST" in
+        *[!A-Za-z0-9.-]*|'') echo "DEPLOY_HOST must be a DNS name or IPv4 address"; exit 1 ;;
+      esac
+      case "$DEPLOY_USER" in
+        *[!A-Za-z0-9._-]*|'') echo "DEPLOY_USER contains unsupported characters"; exit 1 ;;
+      esac
+      case "$DEPLOY_PATH" in
+        /*) ;;
+        *) echo "DEPLOY_PATH must be an absolute path"; exit 1 ;;
+      esac
+      case "$DEPLOY_PATH" in
+        *[!A-Za-z0-9_./-]*) echo "DEPLOY_PATH contains unsupported characters"; exit 1 ;;
+      esac
+      case "$CI_REGISTRY_IMAGE" in
+        *[!A-Za-z0-9_./:-]*) echo "CI_REGISTRY_IMAGE contains unsupported characters"; exit 1 ;;
+      esac
+    - install -m 700 -d ~/.ssh
+    - install -m 600 "$DEPLOY_SSH_KNOWN_HOSTS" ~/.ssh/known_hosts
+    - eval "$(ssh-agent -s)"
+    - ssh-add "$DEPLOY_SSH_PRIVATE_KEY"
+    - export DEPLOY_SSH_TARGET="$DEPLOY_USER@$DEPLOY_HOST"
+  script:
+    - ssh -o BatchMode=yes -o StrictHostKeyChecking=yes "$DEPLOY_SSH_TARGET" "mkdir -p '$DEPLOY_PATH/docker/redis'"
+    - ssh -o BatchMode=yes -o StrictHostKeyChecking=yes "$DEPLOY_SSH_TARGET" "mkdir -p '$DEPLOY_PATH/observability'"
+    - scp -o BatchMode=yes -o StrictHostKeyChecking=yes docker-compose.prod.yml "$DEPLOY_SSH_TARGET:$DEPLOY_PATH/docker-compose.prod.yml"
+    - scp -o BatchMode=yes -o StrictHostKeyChecking=yes docker-compose.audit.yml "$DEPLOY_SSH_TARGET:$DEPLOY_PATH/docker-compose.audit.yml"
+    - scp -o BatchMode=yes -o StrictHostKeyChecking=yes docker/redis/entrypoint.sh "$DEPLOY_SSH_TARGET:$DEPLOY_PATH/docker/redis/entrypoint.sh"
+    - scp -o BatchMode=yes -o StrictHostKeyChecking=yes -r observability "$DEPLOY_SSH_TARGET:$DEPLOY_PATH/"
+    - |
+      ssh -o BatchMode=yes -o StrictHostKeyChecking=yes "$DEPLOY_SSH_TARGET" \
+        "DEPLOY_PATH='$DEPLOY_PATH' APP_IMAGE='$CI_REGISTRY_IMAGE' APP_VERSION='$CI_COMMIT_SHA' POSTGRES_IMAGE='$CI_REGISTRY_IMAGE/postgres' POSTGRES_VERSION='$CI_COMMIT_SHA' sh -s" <<'REMOTE'
+      set -eu
+      cd "$DEPLOY_PATH"
+      compose() {
+        docker compose --env-file .env.prod -f docker-compose.prod.yml "$@"
+      }
+      compose pull
+      compose up -d --remove-orphans
+      attempt=0
+      while [ "$attempt" -lt 36 ]; do
+        if compose ps --format '{{.Service}} {{.Health}}' | grep -Fq 'api healthy'; then
+          exit 0
+        fi
+        attempt=$((attempt + 1))
+        sleep 5
+      done
+      compose logs --tail=100 api
+      exit 1
+      REMOTE
+
+deploy:staging:
+  extends: .deploy
+  environment:
+    name: staging
+  resource_group: staging
+  only:
+    - develop
+  when: manual
+
+deploy:production:
+  extends: .deploy
+  environment:
+    name: production
+  resource_group: production
+  only:
+    - main
+  when: manual

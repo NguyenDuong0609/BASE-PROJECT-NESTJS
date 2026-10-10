@@ -1,0 +1,287 @@
+import { MigrationInterface, QueryRunner, Table, TableColumn, TableForeignKey, TableIndex } from 'typeorm';
+
+/**
+ * Migration Template
+ * 
+ * This is a template showing common migration patterns.
+ * Copy this file when creating manual migrations.
+ * 
+ * File naming: {timestamp}-{DescriptiveName}.ts
+ * Example: 1700000000000-AddEmailVerificationToUsers.ts
+ */
+export class TemplateMigration1234567890123 implements MigrationInterface {
+	name = 'TemplateMigration1234567890123';
+
+	public async up(queryRunner: QueryRunner): Promise<void> {
+		// ==================== CREATE TABLE ====================
+		await queryRunner.createTable(
+			new Table({
+				name: 'example_table',
+				columns: [
+					{
+						name: 'id',
+						type: 'uuid',
+						isPrimary: true,
+						generationStrategy: 'uuid',
+						default: 'uuid_generate_v4()',
+					},
+					{
+						name: 'name',
+						type: 'varchar',
+						length: '255',
+						isNullable: false,
+					},
+					{
+						name: 'description',
+						type: 'text',
+						isNullable: true,
+					},
+					{
+						name: 'status',
+						type: 'enum',
+						enum: ['active', 'inactive', 'pending'],
+						default: "'active'",
+					},
+					{
+						name: 'count',
+						type: 'integer',
+						default: 0,
+					},
+					{
+						name: 'metadata',
+						type: 'jsonb',
+						isNullable: true,
+					},
+					{
+						name: 'user_id',
+						type: 'uuid',
+						isNullable: false,
+					},
+					{
+						name: 'created_at',
+						type: 'timestamp',
+						default: 'now()',
+					},
+					{
+						name: 'updated_at',
+						type: 'timestamp',
+						default: 'now()',
+					},
+					{
+						name: 'deleted_at',
+						type: 'timestamp',
+						isNullable: true,
+					},
+				],
+			}),
+			true, // createForeignKeys
+		);
+
+		// ==================== ADD COLUMN ====================
+		await queryRunner.addColumn(
+			'users',
+			new TableColumn({
+				name: 'bio',
+				type: 'text',
+				isNullable: true,
+			}),
+		);
+
+		// ==================== DROP COLUMN ====================
+		await queryRunner.dropColumn('users', 'old_column_name');
+
+		// ==================== RENAME COLUMN ====================
+		await queryRunner.renameColumn('users', 'old_name', 'new_name');
+
+		// ==================== ALTER COLUMN ====================
+		await queryRunner.changeColumn(
+			'users',
+			'email',
+			new TableColumn({
+				name: 'email',
+				type: 'varchar',
+				length: '320', // Changed from 255
+				isNullable: false,
+				isUnique: true,
+			}),
+		);
+
+		// ==================== CREATE FOREIGN KEY ====================
+		await queryRunner.createForeignKey(
+			'example_table',
+			new TableForeignKey({
+				columnNames: ['user_id'],
+				referencedTableName: 'users',
+				referencedColumnNames: ['id'],
+				onDelete: 'CASCADE',
+				onUpdate: 'NO ACTION',
+			}),
+		);
+
+		// ==================== CREATE INDEX ====================
+		await queryRunner.createIndex(
+			'example_table',
+			new TableIndex({
+				name: 'IDX_example_table_user_id',
+				columnNames: ['user_id'],
+			}),
+		);
+
+		// Create unique index
+		await queryRunner.createIndex(
+			'example_table',
+			new TableIndex({
+				name: 'IDX_example_table_name_unique',
+				columnNames: ['name'],
+				isUnique: true,
+			}),
+		);
+
+		// Create composite index
+		await queryRunner.createIndex(
+			'example_table',
+			new TableIndex({
+				name: 'IDX_example_table_user_status',
+				columnNames: ['user_id', 'status'],
+			}),
+		);
+
+		// ==================== RAW SQL QUERIES ====================
+		
+		// Create enum type
+		await queryRunner.query(`
+			CREATE TYPE "example_status_enum" AS ENUM ('active', 'inactive', 'pending')
+		`);
+
+		// Insert initial data
+		await queryRunner.query(`
+			INSERT INTO "user_roles" ("name", "_description") 
+			VALUES ('NewRole', 'Description of new role')
+		`);
+
+		// Update existing data
+		await queryRunner.query(`
+			UPDATE "users" 
+			SET "bio" = 'Default bio text' 
+			WHERE "bio" IS NULL
+		`);
+
+		// Create extension
+		await queryRunner.query(`
+			CREATE EXTENSION IF NOT EXISTS "uuid-ossp"
+		`);
+
+		// ==================== TRANSACTIONS ====================
+		// For complex operations, use explicit transactions
+		await queryRunner.startTransaction();
+		try {
+			await queryRunner.query(`UPDATE table1 SET field = 'value'`);
+			await queryRunner.query(`UPDATE table2 SET field = 'value'`);
+			await queryRunner.commitTransaction();
+		} catch (err) {
+			await queryRunner.rollbackTransaction();
+			throw err;
+		}
+	}
+
+	public async down(queryRunner: QueryRunner): Promise<void> {
+		// Reverse all operations from up() in reverse order
+
+		// Drop index
+		await queryRunner.dropIndex('example_table', 'IDX_example_table_user_status');
+		await queryRunner.dropIndex('example_table', 'IDX_example_table_name_unique');
+		await queryRunner.dropIndex('example_table', 'IDX_example_table_user_id');
+
+		// Drop foreign key
+		const table = await queryRunner.getTable('example_table');
+		const foreignKey = table.foreignKeys.find(
+			(fk) => fk.columnNames.indexOf('user_id') !== -1,
+		);
+		if (foreignKey) {
+			await queryRunner.dropForeignKey('example_table', foreignKey);
+		}
+
+		// Revert column changes
+		await queryRunner.changeColumn(
+			'users',
+			'email',
+			new TableColumn({
+				name: 'email',
+				type: 'varchar',
+				length: '255', // Back to original
+				isNullable: false,
+				isUnique: true,
+			}),
+		);
+
+		// Revert column rename
+		await queryRunner.renameColumn('users', 'new_name', 'old_name');
+
+		// Re-add dropped column (with appropriate defaults)
+		await queryRunner.addColumn(
+			'users',
+			new TableColumn({
+				name: 'old_column_name',
+				type: 'varchar',
+				isNullable: true,
+			}),
+		);
+
+		// Drop added column
+		await queryRunner.dropColumn('users', 'bio');
+
+		// Drop table
+		await queryRunner.dropTable('example_table', true);
+
+		// Drop enum type
+		await queryRunner.query(`DROP TYPE IF EXISTS "example_status_enum"`);
+	}
+}
+
+/**
+ * COMMON POSTGRESQL TYPES
+ * 
+ * - uuid: Unique identifier
+ * - varchar(n): Variable-length string with limit
+ * - text: Unlimited length string
+ * - integer: 4-byte integer
+ * - bigint: 8-byte integer
+ * - boolean: true/false
+ * - timestamp: Date and time
+ * - date: Date only
+ * - time: Time only
+ * - decimal(p,s): Exact numeric
+ * - jsonb: Binary JSON (preferred over json)
+ * - enum: Custom enumerated type
+ * - array: Array of any type (e.g., text[])
+ * 
+ * COMMON CONSTRAINTS
+ * 
+ * - PRIMARY KEY: Unique identifier for rows
+ * - FOREIGN KEY: References another table
+ * - UNIQUE: Ensures uniqueness
+ * - NOT NULL: Cannot be null
+ * - CHECK: Custom validation constraint
+ * - DEFAULT: Default value when not specified
+ * 
+ * CASCADE OPTIONS
+ * 
+ * - CASCADE: Delete/update related rows
+ * - SET NULL: Set foreign key to NULL
+ * - SET DEFAULT: Set foreign key to default value
+ * - RESTRICT: Prevent deletion if referenced
+ * - NO ACTION: Same as RESTRICT (default)
+ * 
+ * BEST PRACTICES
+ * 
+ * 1. Always implement both up() and down()
+ * 2. Test rollback after testing migration
+ * 3. Use transactions for data migrations
+ * 4. Add indexes for frequently queried columns
+ * 5. Use descriptive constraint/index names
+ * 6. Document complex migrations with comments
+ * 7. Never modify executed migrations in production
+ * 8. Use enum types for fixed value sets
+ * 9. Use JSONB for flexible metadata
+ * 10. Consider performance impact of indexes
+ */

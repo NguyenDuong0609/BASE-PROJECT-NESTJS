@@ -1,0 +1,92 @@
+services:
+  api:
+    build:
+      context: .
+      target: development
+    env_file:
+      - .env.dev
+    environment:
+      NODE_ENV: development
+      DB_HOST: postgres_db
+      DB_PORT: 5432
+      REDIS_HOST: redis
+      ENABLE_PGAUDIT: ${ENABLE_PGAUDIT:-true}
+    ports:
+      - '127.0.0.1:${PORT:-3000}:${PORT:-3000}'
+    depends_on:
+      postgres_db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test:
+        - CMD
+        - node
+        - -e
+        - "fetch('http://127.0.0.1:' + process.env.PORT + '/health/ready').then(r => process.exit(r.ok ? 0 : 1)).catch(() => process.exit(1))"
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 180s
+    volumes:
+      - .:/usr/src/app
+      - /usr/src/app/node_modules
+    restart: unless-stopped
+
+  postgres_db:
+    image: nestjs-base-postgres:15-pgaudit
+    build:
+      context: .
+      dockerfile: docker/postgres/Dockerfile
+    environment:
+      POSTGRES_USER: ${DB_USERNAME:?DB_USERNAME is required}
+      POSTGRES_PASSWORD: ${DB_PASSWORD:?DB_PASSWORD is required}
+      POSTGRES_DB: ${DB_DATABASE:?DB_DATABASE is required}
+    command:
+      - postgres
+      - -c
+      - shared_preload_libraries=pgaudit
+      - -c
+      - pgaudit.log=write,ddl,role
+      - -c
+      - pgaudit.log_parameter=off
+      - -c
+      - pgaudit.log_relation=on
+      - -c
+      - log_line_prefix=%m [%p] user=%u,db=%d,app=%a,client=%h
+    ports:
+      - '127.0.0.1:${DB_PUBLISHED_PORT:-5433}:5432'
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test:
+        ['CMD-SHELL', 'pg_isready -U "$${POSTGRES_USER}" -d "$${POSTGRES_DB}"']
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    restart: unless-stopped
+
+  redis:
+    image: redis:7-alpine
+    environment:
+      REDIS_PASSWORD: ${REDIS_PASSWORD:-}
+    command:
+      - sh
+      - -c
+      - 'if [ -n "$$REDIS_PASSWORD" ]; then exec redis-server --appendonly yes --requirepass "$$REDIS_PASSWORD"; else exec redis-server --appendonly yes; fi'
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - 'if [ -n "$$REDIS_PASSWORD" ]; then REDISCLI_AUTH="$$REDIS_PASSWORD" redis-cli ping | grep -q PONG; else redis-cli ping | grep -q PONG; fi'
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    restart: unless-stopped
+
+volumes:
+  postgres-data:
+  redis-data:
