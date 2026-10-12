@@ -23,7 +23,8 @@ echo.
 echo Next steps:
 echo   1. Run migrations: npm run migration:run
 echo   2. Start app: npm run start:dev
-echo   3. Access: http://localhost:3000
+echo   3. Access API: http://localhost:3000
+echo   4. RedisInsight UI: http://localhost:5540
 echo.
 echo To stop: npm run docker:infra:down
 echo.

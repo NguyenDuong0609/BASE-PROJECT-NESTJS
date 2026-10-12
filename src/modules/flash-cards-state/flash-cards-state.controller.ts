@@ -48,14 +48,16 @@ export class FlashCardsStateController {
 			flashcard_1: {
 				value: {
 					title: 'What is NestJS?',
-					question: 'What progressive Node.js framework is built on top of Express/Fastify?',
+					question:
+						'What progressive Node.js framework is built on top of Express/Fastify?',
 					answer: 'NestJS',
 				} as CreateFlashCardStateDto,
 			},
 			flashcard_2: {
 				value: {
 					title: 'What is TypeScript?',
-					question: 'What is the typed superset of JavaScript that compiles to plain JavaScript?',
+					question:
+						'What is the typed superset of JavaScript that compiles to plain JavaScript?',
 					answer: 'TypeScript',
 				} as CreateFlashCardStateDto,
 			},

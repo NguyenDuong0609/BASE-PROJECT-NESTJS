@@ -1,27 +1,104 @@
-﻿import { Inject, Injectable } from '@nestjs/common';
+import {
+	ConflictException,
+	Inject,
+	Injectable,
+	NotFoundException,
+	Optional,
+} from '@nestjs/common';
 import { BaseServiceAbstract } from 'src/services/base/base.abstract.service';
 import { UserRole } from './entities/user-role.entity';
 import { UserRolesRepositoryInterface } from './interfaces/user-roles.interface';
-import { ConflictException, NotFoundException } from '@nestjs/common';
-import { EntityManager } from 'typeorm';
+import { DeepPartial, EntityManager, FindManyOptions } from 'typeorm';
 import { User } from '../users/entities/user.entity';
+import { AppCacheService } from '@modules/shared/base/cache/app-cache.service';
+import { AppCacheKeyBuilder } from '@modules/shared/base/cache/app-cache-key.builder';
+import { instanceToPlain } from 'class-transformer';
+
+const USER_ROLES_CACHE_NAMESPACE = 'user-roles';
+const USER_ROLES_CACHE_TTL_MS = 60_000;
 
 @Injectable()
 export class UserRolesService extends BaseServiceAbstract<UserRole> {
 	constructor(
 		@Inject('UserRolesRepositoryInterface')
 		private readonly userRolesRepository: UserRolesRepositoryInterface,
+		@Optional() private readonly cache?: AppCacheService,
 	) {
 		super(userRolesRepository);
 	}
 
-	async remove(id: string): Promise<boolean> {
-		return this.userRolesRepository.removeIfUnassigned(id);
+	override async create(createDto: DeepPartial<UserRole>): Promise<UserRole> {
+		const created = await super.create(createDto);
+		await this.cache?.invalidate(USER_ROLES_CACHE_NAMESPACE);
+		return created;
 	}
 
-	createInTransaction(data: Partial<UserRole>, manager: EntityManager) {
+	override async findAll(options?: FindManyOptions<UserRole>) {
+		if (!this.cache) {
+			return super.findAll(options);
+		}
+		return this.cache.getOrSet(
+			USER_ROLES_CACHE_NAMESPACE,
+			AppCacheKeyBuilder.build({
+				route: '/user-roles',
+				query: {
+					skip: options?.skip ?? 0,
+					take: options?.take ?? 20,
+				},
+			}),
+			USER_ROLES_CACHE_TTL_MS,
+			() => super.findAll(options),
+			(val) => val,
+		);
+	}
+
+	override async findOne(id: string): Promise<UserRole> {
+		if (!this.cache) {
+			return super.findOne(id);
+		}
+		return this.cache.getOrSet(
+			USER_ROLES_CACHE_NAMESPACE,
+			AppCacheKeyBuilder.build({
+				route: '/user-roles/:id',
+				params: { id },
+			}),
+			USER_ROLES_CACHE_TTL_MS,
+			() => super.findOne(id),
+			(val) => val,
+		);
+	}
+
+	override async update(
+		id: string,
+		updateDto: DeepPartial<UserRole>,
+	): Promise<UserRole> {
+		const updated = await super.update(id, updateDto);
+		await this.cache?.invalidate(USER_ROLES_CACHE_NAMESPACE);
+		return updated;
+	}
+
+	async remove(id: string): Promise<boolean> {
+		const removed = await this.userRolesRepository.removeIfUnassigned(id);
+		if (removed) {
+			await this.cache?.invalidate(USER_ROLES_CACHE_NAMESPACE);
+		}
+		return removed;
+	}
+
+	async createInTransaction(data: Partial<UserRole>, manager: EntityManager) {
 		const repository = manager.getRepository(UserRole);
-		return repository.save(repository.create(data));
+		if (data.name) {
+			const existing = await repository.findOne({
+				where: { name: data.name },
+				withDeleted: true,
+			});
+			if (existing) {
+				throw new ConflictException(`Role '${data.name}' already exists`);
+			}
+		}
+		const saved = await repository.save(repository.create(data));
+		await this.cache?.invalidate(USER_ROLES_CACHE_NAMESPACE);
+		return saved;
 	}
 
 	async updateInTransaction(
@@ -33,7 +110,9 @@ export class UserRolesService extends BaseServiceAbstract<UserRole> {
 		const role = await repository.findOneBy({ id });
 		if (!role) throw new NotFoundException(`Record not found: ${id}`);
 		Object.assign(role, data);
-		return repository.save(role);
+		const saved = await repository.save(role);
+		await this.cache?.invalidate(USER_ROLES_CACHE_NAMESPACE);
+		return saved;
 	}
 
 	async removeInTransaction(id: string, manager: EntityManager): Promise<void> {
@@ -48,5 +127,6 @@ export class UserRolesService extends BaseServiceAbstract<UserRole> {
 			throw new ConflictException('Cannot delete a role assigned to users');
 		}
 		await roleRepository.softRemove(role);
+		await this.cache?.invalidate(USER_ROLES_CACHE_NAMESPACE);
 	}
 }

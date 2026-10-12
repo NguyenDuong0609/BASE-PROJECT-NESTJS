@@ -1,475 +1,198 @@
 # Metrics
 
-Thu thập metrics Prometheus để giám sát performance và health.
+Hệ thống thu thập và xuất bản time-series metrics định dạng Prometheus trong ứng dụng NestJS.
 
-## Tổng quan
+---
 
-- **Framework**: Prometheus (tùy chọn)
-- **Endpoint**: `/metrics`
-- **Types**: Counters, Histograms, Gauges
-- **Scope**: Process-local (reset on restart)
-- **Feature Flag**: `ENABLE_METRICS=true`
+## 1. Tổng quan Kiến trúc
 
-## Configuration
+- **Framework**: Lightweight in-memory registry tích hợp sẵn (`MetricsRegistry`), không phụ thuộc thư viện nặng.
+- **Endpoint**: `GET /metrics`
+- **Feature Flag**: `ENABLE_METRICS=true` (bắt buộc kích hoạt để bật MetricsModule và interceptor).
+- **Phạm vi dữ liệu**: Process-local (reset khi tiến trình khởi động lại).
+- **Datasource & Dashboard**: Prometheus scrape định kỳ (15s) và hiển thị trực quan trên Grafana qua dashboard `NestJS API Metrics`.
 
-### Environment Variables
+---
+
+## 2. Cấu hình Kích hoạt
+
+### Biến môi trường (`.env.dev` hoặc `.env.prod`)
 
 ```env
-ENABLE_METRICS=false
+ENABLE_METRICS=true
 ```
 
-### Prometheus Configuration
+Khi cờ này bật:
+1. `MetricsModule` được import vào `AppModule`.
+2. Global `MetricsInterceptor` lắng nghe toàn bộ HTTP requests để tính toán số lượng và độ trễ.
+3. Endpoint `GET /metrics` mở công khai cho scraper (Prometheus).
 
-```typescript
-// src/observability/metrics/metrics.module.ts
-import { Module } from '@nestjs/common';
-import { MetricsService } from './metrics.service';
-import { MetricsController } from './metrics.controller';
+---
 
-@Module({
-  controllers: [MetricsController],
-  providers: [MetricsService],
-  exports: [MetricsService],
-})
-export class MetricsModule {}
+## 3. Các loại Metrics trong hệ thống
+
+Dựa trên triển khai thực tế tại [metrics.registry.ts](file:///d:/Project_AI/Project_Base_NestJS_V3/src/observability/metrics.registry.ts):
+
+### 3.1. HTTP Server Requests (`http_server_requests_total`)
+- **Loại**: Counter
+- **Ý nghĩa**: Đếm tổng số lượng HTTP request đã hoàn thành.
+- **Nhãn (Labels)**:
+  - `method`: HTTP Method (`GET`, `POST`, `PUT`, `DELETE`...)
+  - `path`: URL Route đã normalize (ví dụ `/api/v1/auth/sign-in`)
+  - `status`: HTTP Status Code (`200`, `201`, `400`, `401`, `500`...)
+
+**Ví dụ output:**
+```promql
+# HELP http_server_requests_total Total HTTP requests handled by this process.
+# TYPE http_server_requests_total counter
+http_server_requests_total{method="GET",path="/health/ready",status="200"} 42
+http_server_requests_total{method="POST",path="/auth/sign-in",status="200"} 15
+http_server_requests_total{method="POST",path="/auth/sign-in",status="401"} 2
 ```
 
-## Metric Types
+### 3.2. HTTP Request Latency (`http_server_request_duration_seconds`)
+- **Loại**: Histogram
+- **Ý nghĩa**: Phân bổ độ trễ xử lý của các HTTP request theo các ngưỡng thời gian (buckets).
+- **Buckets (giây)**: `[0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, +Inf]`
+- **Dữ liệu xuất bản**:
+  - `http_server_request_duration_seconds_bucket{..., le="..."}`: Số lượng request có độ trễ <= `le`.
+  - `http_server_request_duration_seconds_sum{...}`: Tổng thời gian (giây) của tất cả request.
+  - `http_server_request_duration_seconds_count{...}`: Tổng số lượng request.
 
-### Counters
+**Ví dụ PromQL tính toán:**
+```promql
+# Tính 95th Percentile Latency (P95) trên toàn bộ hệ thống
+histogram_quantile(0.95, sum(rate(http_server_request_duration_seconds_bucket[5m])) by (le))
 
-Counter chỉ tăng, không giảm.
-
-```typescript
-// HTTP request counter
-http_request_total{method="GET",route="/users",status="200"} 1250
-
-// Cache hits
-cache_hit_total{cache="redis"} 5432
-
-// Queue jobs
-queue_job_added_total{queue="email"} 100
-queue_job_completed_total{queue="email"} 95
-queue_job_failed_total{queue="email"} 5
+# Tính 99th Percentile Latency (P99)
+histogram_quantile(0.99, sum(rate(http_server_request_duration_seconds_bucket[5m])) by (le))
 ```
 
-### Histograms
+### 3.3. Cache Operations (`app_cache_operations_total`)
+- **Loại**: Counter
+- **Ý nghĩa**: Thống kê số lượng thao tác đọc ghi bộ nhớ cache Redis.
+- **Nhãn (Labels)**:
+  - `namespace`: Tên namespace của cache (ví dụ: `auth`, `users`, `flash-cards`)
+  - `result`: Kết quả thao tác (`hit`, `miss`, `bypass`, `error`)
 
-Histogram đo distribution của values.
-
-```typescript
-// Request duration histogram
-http_request_duration_seconds_bucket{le="0.005"} 100
-http_request_duration_seconds_bucket{le="0.01"} 250
-http_request_duration_seconds_bucket{le="0.025"} 400
-http_request_duration_seconds_bucket{le="0.05"} 450
-http_request_duration_seconds_bucket{le="0.1"} 480
-http_request_duration_seconds_bucket{le="0.25"} 495
-http_request_duration_seconds_bucket{le="0.5"} 498
-http_request_duration_seconds_bucket{le="1"} 500
-http_request_duration_seconds_bucket{le="+Inf"} 500
-http_request_duration_seconds_sum 12.5
-http_request_duration_seconds_count 500
+**Ví dụ output:**
+```promql
+# HELP app_cache_operations_total Application cache lookups by namespace and result.
+# TYPE app_cache_operations_total counter
+app_cache_operations_total{namespace="auth",result="hit"} 120
+app_cache_operations_total{namespace="auth",result="miss"} 8
 ```
 
-### Gauges
-
-Gauge có thể tăng hoặc giảm.
-
-```typescript
-// Database connection pool
-db_pool_active_connections 15
-db_pool_idle_connections 5
-db_pool_max_connections 20
-
-// Queue size
-queue_size{queue="email"} 10
-queue_size{queue="image"} 25
-queue_size{queue="notification"} 5
-
-// Memory usage
-process_memory_usage_bytes 134217728
+**Tính Cache Hit Rate trên Grafana:**
+```promql
+sum(rate(app_cache_operations_total{result="hit"}[5m]))
+/
+(sum(rate(app_cache_operations_total{result="hit"}[5m])) + sum(rate(app_cache_operations_total{result="miss"}[5m]))) * 100
 ```
 
-## Metrics Collected
+### 3.4. Queue Jobs (`app_queue_jobs`)
+- **Loại**: Gauge
+- **Ý nghĩa**: Theo dõi số lượng jobs trong Bull/Redis queue theo từng trạng thái.
+- **Nhãn (Labels)**:
+  - `queue`: Tên hàng đợi (ví dụ: `email`, `audit`, `notifications`)
+  - `state`: Trạng thái job (`waiting`, `active`, `completed`, `failed`, `delayed`)
 
-### HTTP Metrics
-
-```typescript
-// Request count by method, route, status
-http_request_total{method="GET",route="/users",status="200"}
-
-// Request duration histogram
-http_request_duration_seconds{route="/users"}
-
-// Request size (optional)
-http_request_size_bytes{route="/media/upload"}
-
-// Response size (optional)
-http_response_size_bytes{route="/media/download"}
+**Ví dụ output:**
+```promql
+# HELP app_queue_jobs Queue job counts by queue and state.
+# TYPE app_queue_jobs gauge
+app_queue_jobs{queue="email",state="waiting"} 3
+app_queue_jobs{queue="email",state="active"} 1
+app_queue_jobs{queue="email",state="failed"} 0
 ```
 
-### Database Metrics
+---
+
+## 4. Cách thức thu thập trong Code
+
+### 4.1. MetricsRegistry
+
+Triển khai singleton tại [src/observability/metrics.registry.ts](file:///d:/Project_AI/Project_Base_NestJS_V3/src/observability/metrics.registry.ts):
 
 ```typescript
-// Query duration
-db_query_duration_seconds{query="SELECT * FROM users"}
-
-// Connection pool
-db_pool_active_connections
-db_pool_idle_connections
-db_pool_max_connections
-
-// Transaction duration
-db_transaction_duration_seconds
-```
-
-### Cache Metrics
-
-```typescript
-// Cache hits/misses
-cache_hit_total{cache="redis",key="user"}
-cache_miss_total{cache="redis",key="user"}
-
-// Cache operations
-cache_set_total{cache="redis"}
-cache_get_total{cache="redis"}
-cache_delete_total{cache="redis"}
-```
-
-### Queue Metrics
-
-```typescript
-// Queue size
-queue_size{queue="email"}
-
-// Job counts
-queue_job_added_total{queue="email"}
-queue_job_completed_total{queue="email"}
-queue_job_failed_total{queue="email"}
-queue_job_retry_total{queue="email"}
-
-// Job duration
-queue_job_duration_seconds{queue="email",job="send-email"}
-```
-
-### System Metrics
-
-```typescript
-// Memory
-process_memory_usage_bytes
-process_memory_heap_usage_bytes
-process_memory_heap_total_bytes
-
-// CPU
-process_cpu_seconds_total
-
-// Event loop
-process_event_loop_lag_seconds
-process_event_loop_utilization
-```
-
-## Implementation
-
-### Metrics Service
-
-```typescript
-// src/observability/metrics/metrics.service.ts
-import { Injectable } from '@nestjs/common';
-import { Counter, Histogram, Gauge, Registry } from 'prom-client';
-
 @Injectable()
-export class MetricsService {
-  private httpRequestTotal: Counter;
-  private httpRequestDuration: Histogram;
-  private dbPoolActive: Gauge;
-
-  constructor() {
-    const register = new Registry();
-
-    this.httpRequestTotal = new Counter({
-      name: 'http_request_total',
-      help: 'Total HTTP requests',
-      labelNames: ['method', 'route', 'status'],
-      registers: [register],
-    });
-
-    this.httpRequestDuration = new Histogram({
-      name: 'http_request_duration_seconds',
-      help: 'HTTP request duration in seconds',
-      labelNames: ['route'],
-      buckets: [0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10],
-      registers: [register],
-    });
-
-    this.dbPoolActive = new Gauge({
-      name: 'db_pool_active_connections',
-      help: 'Number of active database connections',
-      registers: [register],
-    });
-  }
-
-  incrementHttpRequest(method: string, route: string, status: number) {
-    this.httpRequestTotal.inc({ method, route, status });
-  }
-
-  observeHttpRequestDuration(route: string, duration: number) {
-    this.httpRequestDuration.observe({ route }, duration);
-  }
-
-  setDbPoolActiveConnections(count: number) {
-    this.dbPoolActive.set(count);
-  }
-
-  getMetrics(): string {
-    return this.httpRequestTotal.register.metrics();
-  }
+export class MetricsRegistry {
+  recordHttpRequest(method: string, path: string, status: number, durationSeconds: number): void;
+  recordCacheOperation(namespace: string, result: 'hit' | 'miss' | 'bypass' | 'error'): void;
+  setQueueDepth(queue: string, state: QueueState, count: number): void;
+  renderPrometheus(): string;
 }
 ```
 
-### Metrics Interceptor
+### 4.2. Tự động ghi nhận qua Interceptor
+
+[src/observability/metrics.interceptor.ts](file:///d:/Project_AI/Project_Base_NestJS_V3/src/observability/metrics.interceptor.ts) đo thời gian xử lý của mỗi request:
 
 ```typescript
-// src/observability/metrics/metrics.interceptor.ts
-import { Injectable, NestInterceptor, ExecutionContext, CallHandler } from '@nestjs/common';
-import { Observable } from 'rxjs';
-import { tap } from 'rxjs/operators';
-import { MetricsService } from './metrics.service';
-
 @Injectable()
 export class MetricsInterceptor implements NestInterceptor {
-  constructor(private metricsService: MetricsService) {}
+  constructor(private readonly metrics: MetricsRegistry) {}
 
-  intercept(context: ExecutionContext, next: CallHandler): Observable<any> {
-    const request = context.switchToHttp().getRequest();
-    const start = Date.now();
-    const { method, url } = request;
+  intercept(context: ExecutionContext, next: CallHandler): Observable<unknown> {
+    const startedAt = process.hrtime.bigint();
+    const http = context.switchToHttp();
+    const req = http.getRequest();
+    const res = http.getResponse();
 
     return next.handle().pipe(
-      tap(() => {
-        const duration = (Date.now() - start) / 1000;
-        const status = context.switchToHttp().getResponse().statusCode;
-
-        this.metricsService.incrementHttpRequest(method, url, status);
-        this.metricsService.observeHttpRequestDuration(url, duration);
+      finalize(() => {
+        const durationSeconds = Number(process.hrtime.bigint() - startedAt) / 1_000_000_000;
+        this.metrics.recordHttpRequest(req.method, req.route?.path ?? req.path, res.statusCode, durationSeconds);
       }),
     );
   }
 }
 ```
 
-### Metrics Controller
+---
 
-```typescript
-// src/observability/metrics/metrics.controller.ts
-import { Controller, Get, Header } from '@nestjs/common';
-import { MetricsService } from './metrics.service';
+## 5. Cấu hình Prometheus Scrape
 
-@Controller('metrics')
-export class MetricsController {
-  constructor(private metricsService: MetricsService) {}
-
-  @Get()
-  @Header('Content-Type', 'text/plain')
-  metrics() {
-    return this.metricsService.getMetrics();
-  }
-}
-```
-
-## Prometheus Setup
-
-### Scrape Configuration
+Trong `docker-compose.dev.yml` và `docker-compose.audit.yml`, Prometheus được cấu hình scrape như sau:
 
 ```yaml
-# prometheus.yml
 scrape_configs:
-  - job_name: 'nestjs-api'
+  - job_name: nestjs-api
+    metrics_path: /metrics
     scrape_interval: 15s
     static_configs:
-      - targets: ['api:3000']
-    metrics_path: '/metrics'
+      - targets: ['api:3000']   # Hostname container trong Docker Network
+
+  - job_name: redis
+    scrape_interval: 15s
+    static_configs:
+      - targets: ['redis-exporter:9121']   # Redis Exporter container
 ```
 
-### Docker Compose with Prometheus
+---
 
-```yaml
-# docker-compose.prod.yml
-prometheus:
-  image: prom/prometheus:latest
-  volumes:
-    - ./prometheus.yml:/etc/prometheus/prometheus.yml
-    - prometheus_data:/prometheus
-  command:
-    - '--config.file=/etc/prometheus/prometheus.yml'
-    - '--storage.tsdb.path=/prometheus'
-  ports:
-    - "9090:9090"
-```
+## 6. Pre-configured Grafana Dashboards
 
-## Prometheus Queries
+Dự án đã dựng sẵn 2 file dashboard metrics chính tại thư mục `observability/grafana/dashboards/`:
 
-### Request Rate
+### 📊 1. [NestJS API Metrics](file:///d:/Project_AI/Project_Base_NestJS_V3/observability/grafana/dashboards/nestjs-api-metrics.json)
+Khi Grafana khởi động, dashboard sẽ tự động có mặt tại:
+- **Tên Dashboard**: `NestJS API Metrics`
+- **Các Panels bao gồm**:
+  1. **Request Rate (req/s)**: `sum(rate(http_server_requests_total[1m])) by (method, path)`
+  2. **Latency P50, P95, P99**: Histogram percentile thời gian phản hồi
+  3. **HTTP 4xx / 5xx Error Rate**: Tỷ lệ lỗi so với tổng số requests
+  4. **Cache Hit Rate (%)**: Tỷ lệ cache trúng/trượt
+  5. **Queue Depth**: Số lượng job đang chờ hoặc gặp lỗi
+  6. **Top Slowest Endpoints**: Bảng thống kê đường dẫn chậm nhất
 
-```promql
-# Requests per second
-rate(http_request_total[1m])
+### 🔴 2. [Redis & Cache Performance](file:///d:/Project_AI/Project_Base_NestJS_V3/observability/grafana/dashboards/redis-cache-performance.json)
+*(Xem hướng dẫn sử dụng chi tiết tại [redis-cache-monitoring.md](file:///d:/Project_AI/Project_Base_NestJS_V3/docs-v2/06-OBSERVABILITY/redis-cache-monitoring.md))*
+- **Tên Dashboard**: `Redis & Cache Performance`
+- **Các Panels bao gồm**:
+  1. **Redis Server Health**: Uptime, Connected Clients, Total Keys, Commands/sec
+  2. **💾 Redis Memory (RAM)**: `redis_memory_used_bytes`, `redis_memory_used_peak_bytes`, `redis_memory_max_bytes`, `redis_mem_fragmentation_ratio`
+  3. **⚡ Redis CPU**: User CPU vs System CPU (`redis_cpu_user_seconds_total`, `redis_cpu_sys_seconds_total`), Background saves
+  4. **📊 Application Cache Hit / Miss**: Overall Hit Rate (%), Thống kê Hit/Miss/Bypass/Error, Tỷ lệ theo từng namespace, Xu hướng thời gian thực
+  5. **📈 Redis Throughput & Network**: Network I/O (Bps), Keyspace Hit Rate (%), Evicted keys, Connection rates
 
-# 4xx error rate
-rate(http_request_total{status=~"4.."}[5m])
-
-# 5xx error rate
-rate(http_request_total{status=~"5.."}[5m])
-```
-
-### Request Duration
-
-```promql
-# Average request duration
-rate(http_request_duration_seconds_sum[5m]) / rate(http_request_duration_seconds_count[5m])
-
-# 95th percentile
-histogram_quantile(0.95, http_request_duration_seconds_bucket)
-
-# 99th percentile
-histogram_quantile(0.99, http_request_duration_seconds_bucket)
-```
-
-### Database Performance
-
-```promql
-# Average query duration
-rate(db_query_duration_seconds_sum[5m]) / rate(db_query_duration_seconds_count[5m])
-
-# Connection pool usage
-db_pool_active_connections / db_pool_max_connections
-```
-
-### Queue Metrics
-
-```promql
-# Queue size
-queue_size{queue="email"}
-
-# Job failure rate
-rate(queue_job_failed_total[5m]) / rate(queue_job_added_total[5m])
-
-# Average job duration
-rate(queue_job_duration_seconds_sum[5m]) / rate(queue_job_duration_seconds_count[5m])
-```
-
-## Grafana Dashboards
-
-### API Dashboard
-
-- Request rate (rps)
-- Error rate (4xx, 5xx)
-- P50, P95, P99 latency
-- Status code distribution
-
-### Database Dashboard
-
-- Connection pool usage
-- Query duration histogram
-- Transaction duration
-- Slow queries
-
-### Queue Dashboard
-
-- Queue size trends
-- Job completion rate
-- Job failure rate
-- Average job duration
-
-### System Dashboard
-
-- CPU usage
-- Memory usage
-- Event loop lag
-- Disk I/O
-
-## Best Practices
-
-### 1. Label Naming
-
-```typescript
-// ✅ DO: Consistent naming
-http_request_total{method="GET",route="/users",status="200"}
-
-// ❌ DON'T: Inconsistent naming
-http_requests{http_method="GET",path="/users",response_code="200"}
-```
-
-### 2. Use Histograms for Duration
-
-```typescript
-// ✅ DO: Histogram for duration
-http_request_duration_seconds
-
-// ❌ DON'T: Counter for duration
-http_request_duration_sum  // Don't do this
-```
-
-### 3. Cardinality Management
-
-```typescript
-// ❌ DON'T: High cardinality labels
-http_request_total{user_id="uuid"}  // Too many unique values
-
-// ✅ DO: Low cardinality labels
-http_request_total{method="GET",route="/users"}
-```
-
-### 4. Bucket Selection
-
-```typescript
-// Good buckets for latency
-buckets: [0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10]
-```
-
-### 5. Metrics Naming Convention
-
-```typescript
-// Format: metric_name_unit{labels}
-http_request_duration_seconds
-db_query_duration_milliseconds
-cache_hit_total
-queue_size
-```
-
-## Troubleshooting
-
-### Metrics endpoint 404
-
-**Check:**
-- `ENABLE_METRICS=true`
-- Metrics module registered
-- Controller route correct
-
-### Metrics not updating
-
-**Check:**
-- Interceptor registered globally
-- Metrics service called
-- No exceptions in metrics code
-
-### High cardinality warning
-
-**Solution:**
-- Reduce number of labels
-- Use predefined label values
-- Remove high-cardinality labels
-
-### Prometheus not scraping
-
-**Check:**
-- Prometheus configuration
-- Target accessible
-- Scrape interval configured
-- Network connectivity
-
-## Tài liệu liên quan
-
-- [Observability Overview](README.md)
-- [Monitoring](monitoring.md)
-- [Prometheus Documentation](https://prometheus.io/docs/)

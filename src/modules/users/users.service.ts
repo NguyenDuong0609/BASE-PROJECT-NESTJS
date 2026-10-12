@@ -3,6 +3,7 @@ import {
 	Inject,
 	Injectable,
 	NotFoundException,
+	Optional,
 } from '@nestjs/common';
 import { BaseServiceAbstract } from 'src/services/base/base.abstract.service';
 import { User } from './entities/user.entity';
@@ -16,6 +17,12 @@ import { FindManyOptions } from 'typeorm';
 import { DeepPartial, EntityManager } from 'typeorm';
 import { normalizeEmail } from '../../shared/normalize-email';
 import { UserRole } from '@modules/user-roles/entities/user-role.entity';
+import { AppCacheService } from '@modules/shared/base/cache/app-cache.service';
+import { AppCacheKeyBuilder } from '@modules/shared/base/cache/app-cache-key.builder';
+import { instanceToPlain } from 'class-transformer';
+
+const USERS_CACHE_NAMESPACE = 'users';
+const USERS_CACHE_TTL_MS = 30_000;
 
 @Injectable()
 export class UsersService extends BaseServiceAbstract<User> {
@@ -23,6 +30,7 @@ export class UsersService extends BaseServiceAbstract<User> {
 		@Inject('UsersRepositoryInterface')
 		private readonly usersRepository: UsersRepositoryInterface,
 		private readonly userRolesService: UserRolesService,
+		@Optional() private readonly cache?: AppCacheService,
 	) {
 		super(usersRepository);
 	}
@@ -53,10 +61,12 @@ export class UsersService extends BaseServiceAbstract<User> {
 			});
 		}
 		try {
-			return await this.usersRepository.create({
+			const created = await this.usersRepository.create({
 				...createDto,
 				role: user_role,
 			});
+			await this.cache?.invalidate(USERS_CACHE_NAMESPACE);
+			return created;
 		} catch (error) {
 			if (getErrorCode(error) === '23505') {
 				throw new ConflictException('Email or username already exists');
@@ -78,13 +88,15 @@ export class UsersService extends BaseServiceAbstract<User> {
 				.getRepository(UserRole)
 				.save(manager.getRepository(UserRole).create({ name: USER_ROLE.USER }));
 		}
-		return repository.save(
+		const created = await repository.save(
 			repository.create({
 				...createDto,
 				email: normalizeEmail(createDto.email),
 				role,
 			}),
 		);
+		await this.cache?.invalidate(USERS_CACHE_NAMESPACE);
+		return created;
 	}
 
 	async updateInTransaction(
@@ -96,7 +108,9 @@ export class UsersService extends BaseServiceAbstract<User> {
 		const user = await repository.findOneBy({ id });
 		if (!user) throw new NotFoundException('User not found');
 		Object.assign(user, updateDto);
-		return repository.save(user);
+		const saved = await repository.save(user);
+		await this.cache?.invalidate(USERS_CACHE_NAMESPACE);
+		return saved;
 	}
 
 	async removeInTransaction(id: string, manager: EntityManager): Promise<void> {
@@ -104,6 +118,13 @@ export class UsersService extends BaseServiceAbstract<User> {
 		const user = await repository.findOneBy({ id });
 		if (!user) throw new NotFoundException('User not found');
 		await repository.softRemove(user);
+		await this.cache?.invalidate(USERS_CACHE_NAMESPACE);
+	}
+
+	override async remove(id: string): Promise<boolean> {
+		const removed = await super.remove(id);
+		await this.cache?.invalidate(USERS_CACHE_NAMESPACE);
+		return removed;
 	}
 
 	/**
@@ -118,10 +139,40 @@ export class UsersService extends BaseServiceAbstract<User> {
 	async findAll(
 		options?: FindManyOptions<User>,
 	): Promise<FindAllResponse<User>> {
-		return await this.usersRepository.findAll({
-			...options,
-			relations: ['role'],
-		});
+		if (!this.cache) {
+			return await this.usersRepository.findAll({
+				...options,
+				relations: ['role'],
+			});
+		}
+		return this.cache.getOrSet(
+			USERS_CACHE_NAMESPACE,
+			AppCacheKeyBuilder.build({
+				route: '/users',
+				query: {
+					skip: options?.skip ?? 0,
+					take: options?.take ?? 20,
+				},
+			}),
+			USERS_CACHE_TTL_MS,
+			() =>
+				this.usersRepository.findAll({
+					...options,
+					relations: ['role'],
+				}),
+			(val) => ({
+				...val,
+				items: (val.items || []).map(
+					({
+						password,
+						googleId,
+						current_refresh_token,
+						twoFactorAuthenticationSecret,
+						...safe
+					}) => safe,
+				),
+			}),
+		);
 	}
 
 	/**
@@ -153,11 +204,39 @@ export class UsersService extends BaseServiceAbstract<User> {
 	 * const user = await usersService.getUserWithRole('uuid-here');
 	 */
 	async getUserWithRole(user_id: string): Promise<User> {
-		const user = await this.usersRepository.getUserWithRole(user_id);
-		if (!user) {
-			throw new NotFoundException('User not found');
+		if (!this.cache) {
+			const user = await this.usersRepository.getUserWithRole(user_id);
+			if (!user) {
+				throw new NotFoundException('User not found');
+			}
+			return user;
 		}
-		return user;
+
+		return this.cache.getOrSet(
+			USERS_CACHE_NAMESPACE,
+			AppCacheKeyBuilder.build({
+				route: '/users/:id',
+				params: { id: user_id },
+			}),
+			USERS_CACHE_TTL_MS,
+			async () => {
+				const user = await this.usersRepository.getUserWithRole(user_id);
+				if (!user) {
+					throw new NotFoundException('User not found');
+				}
+				return user;
+			},
+			(val) => {
+				const {
+					password,
+					googleId,
+					current_refresh_token,
+					twoFactorAuthenticationSecret,
+					...safe
+				} = val as User;
+				return safe;
+			},
+		);
 	}
 
 	/**
@@ -196,6 +275,8 @@ export class UsersService extends BaseServiceAbstract<User> {
 			throw new NotFoundException('User not found');
 		}
 		Object.assign(user, updateDto);
-		return this.usersRepository.create(user);
+		const saved = await this.usersRepository.create(user);
+		await this.cache?.invalidate(USERS_CACHE_NAMESPACE);
+		return saved;
 	}
 }

@@ -51,7 +51,8 @@ export class TopicsController {
 			topic_1: {
 				value: {
 					name: 'English Vocabulary',
-					description: 'Common English words and phrases for everyday conversations',
+					description:
+						'Common English words and phrases for everyday conversations',
 				} as CreateTopicDto,
 			},
 			topic_2: {

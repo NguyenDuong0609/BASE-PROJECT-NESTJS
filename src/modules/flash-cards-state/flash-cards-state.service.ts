@@ -17,6 +17,12 @@ import { FlashCardStateEnum } from './entities/flash-card-state.entity';
 import { ApiException } from '../../shared/api-errors';
 import { USER_ROLE } from '@modules/user-roles/entities/user-role.entity';
 import { createContextLogger } from '../../configs/logger.config';
+import { AppCacheService } from '@modules/shared/base/cache/app-cache.service';
+import { AppCacheKeyBuilder } from '@modules/shared/base/cache/app-cache-key.builder';
+import { instanceToPlain } from 'class-transformer';
+
+const FLASH_CARDS_STATE_CACHE_NAMESPACE = 'flash-cards-state';
+const FLASH_CARDS_STATE_CACHE_TTL_MS = 30_000;
 
 @Injectable()
 export class FlashCardsStateService {
@@ -29,6 +35,7 @@ export class FlashCardsStateService {
 		private readonly transitionRepository: Repository<FlashCardTransition>,
 		private readonly flashCardContext: FlashCardContext,
 		@Optional() logger?: PinoLogger,
+		@Optional() private readonly cache?: AppCacheService,
 	) {
 		this.logger = createContextLogger(FlashCardsStateService.name, logger);
 	}
@@ -48,19 +55,38 @@ export class FlashCardsStateService {
 			{ flashCardId: flashCard.id, userId },
 			'Flash card created',
 		);
+		await this.cache?.invalidate(FLASH_CARDS_STATE_CACHE_NAMESPACE);
 		return flashCard;
 	}
 
 	async findAll(limit = 20, offset = 0, userId: string, isAdmin: boolean) {
-		const [items, total] = await this.flashCardRepository.findAndCount({
-			relations: ['createdBy'],
-			where: isAdmin ? {} : { createdBy: { id: userId } },
-			order: { createdAt: 'DESC' },
-			skip: offset,
-			take: limit,
-		});
+		const fetchList = async () => {
+			const [items, total] = await this.flashCardRepository.findAndCount({
+				relations: ['createdBy'],
+				where: isAdmin ? {} : { createdBy: { id: userId } },
+				order: { createdAt: 'DESC' },
+				skip: offset,
+				take: limit,
+			});
 
-		return { items, total, limit, offset };
+			return { items, total, limit, offset };
+		};
+
+		if (!this.cache) {
+			return fetchList();
+		}
+
+		return this.cache.getOrSet(
+			FLASH_CARDS_STATE_CACHE_NAMESPACE,
+			AppCacheKeyBuilder.build({
+				route: '/flash-cards-state',
+				scope: { userId, role: isAdmin ? 'admin' : 'user' },
+				query: { limit, offset },
+			}),
+			FLASH_CARDS_STATE_CACHE_TTL_MS,
+			fetchList,
+			(val) => instanceToPlain(val),
+		);
 	}
 
 	async findOne(
@@ -68,15 +94,33 @@ export class FlashCardsStateService {
 		userId: string,
 		isAdmin: boolean,
 	): Promise<FlashCardState> {
-		const card = await this.flashCardRepository.findOne({
-			where: { id },
-			relations: ['createdBy', 'transitions', 'transitions.transitionedBy'],
-		});
-		if (!card) throw new ApiException('FLASH_CARD_NOT_FOUND');
-		if (!isAdmin && card.createdBy.id !== userId) {
-			throw new ApiException('FLASH_CARD_ACCESS_DENIED');
+		const fetchOne = async () => {
+			const card = await this.flashCardRepository.findOne({
+				where: { id },
+				relations: ['createdBy', 'transitions', 'transitions.transitionedBy'],
+			});
+			if (!card) throw new ApiException('FLASH_CARD_NOT_FOUND');
+			if (!isAdmin && card.createdBy.id !== userId) {
+				throw new ApiException('FLASH_CARD_ACCESS_DENIED');
+			}
+			return card;
+		};
+
+		if (!this.cache) {
+			return fetchOne();
 		}
-		return card;
+
+		return this.cache.getOrSet(
+			FLASH_CARDS_STATE_CACHE_NAMESPACE,
+			AppCacheKeyBuilder.build({
+				route: '/flash-cards-state/:id',
+				params: { id },
+				scope: { userId, role: isAdmin ? 'admin' : 'user' },
+			}),
+			FLASH_CARDS_STATE_CACHE_TTL_MS,
+			fetchOne,
+			(val) => instanceToPlain(val),
+		);
 	}
 
 	async update(
@@ -94,7 +138,9 @@ export class FlashCardsStateService {
 		}
 
 		Object.assign(flashCard, updateDto);
-		return this.flashCardRepository.save(flashCard);
+		const saved = await this.flashCardRepository.save(flashCard);
+		await this.cache?.invalidate(FLASH_CARDS_STATE_CACHE_NAMESPACE);
+		return saved;
 	}
 
 	/**
@@ -123,6 +169,7 @@ export class FlashCardsStateService {
 		}
 		await this.flashCardContext.submit(userId, comment);
 		this.logger.info({ flashCardId: id, userId }, 'Flash card submitted');
+		await this.cache?.invalidate(FLASH_CARDS_STATE_CACHE_NAMESPACE);
 		return this.flashCardContext.getFlashCard();
 	}
 
@@ -148,6 +195,7 @@ export class FlashCardsStateService {
 		await this.flashCardContext.loadFlashCard(id);
 		await this.flashCardContext.approve(userId, comment);
 		this.logger.info({ flashCardId: id, userId }, 'Flash card approved');
+		await this.cache?.invalidate(FLASH_CARDS_STATE_CACHE_NAMESPACE);
 		return this.flashCardContext.getFlashCard();
 	}
 
@@ -172,6 +220,7 @@ export class FlashCardsStateService {
 		await this.flashCardContext.loadFlashCard(id);
 		await this.flashCardContext.reject(userId, comment);
 		this.logger.info({ flashCardId: id, userId }, 'Flash card rejected');
+		await this.cache?.invalidate(FLASH_CARDS_STATE_CACHE_NAMESPACE);
 		return this.flashCardContext.getFlashCard();
 	}
 
@@ -197,6 +246,8 @@ export class FlashCardsStateService {
 		await this.flashCardContext.loadFlashCard(id);
 		await this.flashCardContext.publish(userId, comment);
 		this.logger.info({ flashCardId: id, userId }, 'Flash card published');
+		await this.cache?.invalidate(FLASH_CARDS_STATE_CACHE_NAMESPACE);
+		await this.cache?.invalidate('flash-cards');
 		return this.flashCardContext.getFlashCard();
 	}
 
@@ -205,12 +256,30 @@ export class FlashCardsStateService {
 		userId: string,
 		isAdmin: boolean,
 	): Promise<FlashCardTransition[]> {
-		await this.findOne(id, userId, isAdmin);
-		return this.transitionRepository.find({
-			where: { flashCard: { id } },
-			relations: ['transitionedBy'],
-			order: { transitionedAt: 'ASC' },
-		});
+		const fetchHistory = async () => {
+			await this.findOne(id, userId, isAdmin);
+			return this.transitionRepository.find({
+				where: { flashCard: { id } },
+				relations: ['transitionedBy'],
+				order: { transitionedAt: 'ASC' },
+			});
+		};
+
+		if (!this.cache) {
+			return fetchHistory();
+		}
+
+		return this.cache.getOrSet(
+			FLASH_CARDS_STATE_CACHE_NAMESPACE,
+			AppCacheKeyBuilder.build({
+				route: '/flash-cards-state/:id/history',
+				params: { id },
+				scope: { userId, role: isAdmin ? 'admin' : 'user' },
+			}),
+			FLASH_CARDS_STATE_CACHE_TTL_MS,
+			fetchHistory,
+			(val) => instanceToPlain(val),
+		);
 	}
 
 	async getAllowedTransitions(

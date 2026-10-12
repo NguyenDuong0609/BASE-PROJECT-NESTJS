@@ -15,6 +15,8 @@ import { createContextLogger } from '../../../configs/logger.config';
 import { ImageOperation } from '@modules/queue/interfaces/job-data.interface';
 import { randomUUID } from 'crypto';
 import { validateFileSignature } from 'src/shared/upload-validation';
+import { AppCacheService } from '@modules/shared/base/cache/app-cache.service';
+import { AppCacheKeyBuilder } from '@modules/shared/base/cache/app-cache-key.builder';
 
 interface UploadOptions {
 	folder?: string;
@@ -31,6 +33,9 @@ type SafeMediaFile = Pick<
 	'id' | 'filename' | 'mimetype' | 'size' | 'status' | 'uploadedAt'
 >;
 
+const MEDIA_CACHE_NAMESPACE = 'media';
+const MEDIA_CACHE_TTL_MS = 120_000;
+
 @Injectable()
 export class MediaService {
 	private readonly logger: PinoLogger;
@@ -40,6 +45,7 @@ export class MediaService {
 		private readonly mediaRepository: Repository<MediaFile>,
 		private readonly s3Service: S3Service,
 		private readonly queueService: QueueService,
+		@Optional() private readonly cache?: AppCacheService,
 		@Optional() logger?: PinoLogger,
 	) {
 		this.logger = createContextLogger(MediaService.name, logger);
@@ -86,6 +92,7 @@ export class MediaService {
 				{ mediaFileId: savedMediaFile.id, userId },
 				'File uploaded successfully',
 			);
+			await this.cache?.invalidate(MEDIA_CACHE_NAMESPACE);
 			return this.toSafeResponse(savedMediaFile);
 		} catch (error) {
 			this.logger.error({ err: error, userId }, 'File upload failed');
@@ -118,9 +125,29 @@ export class MediaService {
 		userId: string,
 		isAdmin = false,
 	): Promise<SafeMediaFile> {
-		const file = await this.findFile(id);
-		this.assertOwner(file, userId, isAdmin);
-		return this.toSafeResponse(file);
+		if (!this.cache) {
+			const file = await this.findFile(id);
+			this.assertOwner(file, userId, isAdmin);
+			return this.toSafeResponse(file);
+		}
+
+		const cacheKey = AppCacheKeyBuilder.build({
+			route: '/media/:id',
+			params: { id },
+			query: { userId, isAdmin },
+		});
+
+		return this.cache.getOrSet(
+			MEDIA_CACHE_NAMESPACE,
+			cacheKey,
+			MEDIA_CACHE_TTL_MS,
+			async () => {
+				const file = await this.findFile(id);
+				this.assertOwner(file, userId, isAdmin);
+				return this.toSafeResponse(file);
+			},
+			(val) => val,
+		);
 	}
 
 	private async findFile(id: string): Promise<MediaFile> {
@@ -154,6 +181,7 @@ export class MediaService {
 		try {
 			await this.s3Service.deleteFile(file.s3Key);
 			await this.mediaRepository.softDelete(id);
+			await this.cache?.invalidate(MEDIA_CACHE_NAMESPACE);
 			this.logger.info(
 				{ mediaFileId: id, userId },
 				'File deleted successfully',

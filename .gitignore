@@ -1,9 +1,10 @@
-﻿# compiled output
+# compiled output
 /dist
 /node_modules
 /mongo-data
 /secure
 /pg-data
+*.tsbuildinfo
 
 # Logs
 logs

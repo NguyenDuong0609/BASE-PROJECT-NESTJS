@@ -1,4 +1,4 @@
-﻿version: '3.8'
+version: '3.8'
 
 services:
   postgres_db:
@@ -40,10 +40,26 @@ services:
       timeout: 5s
       retries: 5
 
+  redisinsight:
+    container_name: redisinsight_dev
+    image: redis/redisinsight:2.68
+    ports:
+      - "5540:5540"
+    volumes:
+      - redisinsight-data:/data
+    depends_on:
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+    networks:
+      - app-network
+
 volumes:
   postgres-data:
     driver: local
   redis-data:
+    driver: local
+  redisinsight-data:
     driver: local
 
 networks:

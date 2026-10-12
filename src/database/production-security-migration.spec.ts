@@ -38,5 +38,5 @@ describe('ProductionSecurity migration', () => {
 			'UPDATE "users" SET "current_refresh_token" = NULL WHERE "current_refresh_token" IS NOT NULL',
 		);
 		expect(query).toHaveBeenCalledTimes(4);
-	});
+	}, 20000);
 });

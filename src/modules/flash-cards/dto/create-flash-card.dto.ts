@@ -47,6 +47,24 @@ export class CreateFlashCardDto {
 		description: 'Example sentences',
 		required: false,
 	})
+	@Transform(({ value }) => {
+		if (value === undefined || value === null || value === '') return undefined;
+		if (Array.isArray(value)) return value;
+		if (typeof value === 'string') {
+			try {
+				const parsed = JSON.parse(value);
+				if (Array.isArray(parsed)) return parsed;
+			} catch {}
+			if (value.includes(',')) {
+				return value
+					.split(',')
+					.map((item: string) => item.trim())
+					.filter(Boolean);
+			}
+			return [value];
+		}
+		return value;
+	})
 	@IsOptional()
 	@IsArray()
 	@ArrayMinSize(1)

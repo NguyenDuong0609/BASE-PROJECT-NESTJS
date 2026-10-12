@@ -38,12 +38,13 @@ Tất cả tài liệu kỹ thuật mới trong `docs-v2/` đã được viết 
 3. feature-flags.md - Feature flags
 4. third-party-integration.md - Tích hợp bên thứ 3
 
-### 06-OBSERVABILITY/ (5 files) ✅
+### 06-OBSERVABILITY/ (6 files) ✅
 1. README.md - Tổng quan observability
 2. logging.md - Logging
 3. metrics.md - Metrics
 4. monitoring.md - Monitoring
 5. auditing.md - Auditing
+6. redis-cache-monitoring.md - Giám sát Redis & Cache (RedisInsight UI, RAM, CPU, % Cache Hit/Miss)
 
 ## Lưu ý về Tiếng Việt
 

@@ -1,0 +1,77 @@
+// ──────────────────────────────────────────────
+// Grafana Alloy – Collect Docker container logs
+// ──────────────────────────────────────────────
+
+// 1. Discover Docker containers
+discovery.docker "containers" {
+  host = "unix:///var/run/docker.sock"
+}
+
+// 2. Relabel: keep only containers from this compose project,
+//    attach useful labels for Loki queries.
+discovery.relabel "docker_logs" {
+  targets = discovery.docker.containers.targets
+
+  // Use the container name as the primary label
+  rule {
+    source_labels = ["__meta_docker_container_name"]
+    regex         = "/(.*)"
+    target_label  = "container"
+  }
+
+  // Attach the compose service name
+  rule {
+    source_labels = ["__meta_docker_container_label_com_docker_compose_service"]
+    target_label  = "service"
+  }
+
+  // Attach the compose project name
+  rule {
+    source_labels = ["__meta_docker_container_label_com_docker_compose_project"]
+    target_label  = "project"
+  }
+}
+
+// 3. Read logs from discovered containers
+loki.source.docker "docker_logs" {
+  host    = "unix:///var/run/docker.sock"
+  targets = discovery.relabel.docker_logs.output
+  forward_to = [loki.process.pipeline.receiver]
+}
+
+// 4. Processing pipeline – parse JSON logs from Pino / pgAudit
+loki.process "pipeline" {
+  // Try to parse Pino JSON logs
+  stage.json {
+    expressions = {
+      level       = "level",
+      msg         = "msg",
+      timestamp   = "time",
+      context     = "context",
+      event       = "event",
+      http_method = "req.method",
+      http_status = "res.statusCode",
+      http_url    = "req.url",
+    }
+  }
+
+  // Promote extracted fields to labels
+  stage.labels {
+    values = {
+      level       = "level",
+      context     = "context",
+      event       = "event",
+      http_method = "http_method",
+      http_status = "http_status",
+    }
+  }
+
+  forward_to = [loki.write.local.receiver]
+}
+
+// 5. Write logs to the local Loki instance
+loki.write "local" {
+  endpoint {
+    url = "http://loki:3100/loki/api/v1/push"
+  }
+}

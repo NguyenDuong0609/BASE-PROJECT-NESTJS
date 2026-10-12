@@ -6,7 +6,7 @@ Hướng dẫn chi tiết để thiết lập và chạy dự án trên máy loc
 
 - Node.js >= 24.15.0
 - npm (đi kèm Node.js)
-- Docker Desktop/Engine
+- Docker Desktop/Engine (Docker Compose v2)
 - Git
 
 ## 1. Cài đặt dependencies
@@ -14,7 +14,7 @@ Hướng dẫn chi tiết để thiết lập và chạy dự án trên máy loc
 ```powershell
 # Clone repository
 git clone <repository-url>
-cd nguyenduong864-beep-shiny-couscous
+cd <project-directory>
 
 # Cài đặt dependencies
 npm ci
@@ -51,6 +51,15 @@ CORS_ORIGINS=http://localhost:4200
 node -e "console.log(require('node:crypto').randomBytes(48).toString('hex'))"
 ```
 
+### Monitoring (Grafana)
+
+```env
+# Grafana (tùy chọn, dùng khi bật monitoring profile)
+GRAFANA_ADMIN_USER=admin
+GRAFANA_ADMIN_PASSWORD=<tạo-password-mạnh>
+GRAFANA_ROOT_URL=http://localhost:3001
+```
+
 ### Tùy chọn (nếu cần Swagger)
 
 ```env
@@ -59,72 +68,115 @@ SWAGGER_USERNAME=local-docs
 SWAGGER_PASSWORD=replace-with-at-least-16-characters
 ```
 
-## 3. Khởi động Database và Redis
+## 3. Khởi động môi trường Development
+
+### Cách A: Full Docker stack (khuyến nghị)
+
+Chạy toàn bộ stack trong Docker, bao gồm cả RedisInsight và monitoring stack.
+
+#### 1. Lệnh 1 dòng gọn nhất (Vừa Build vừa Start toàn bộ service – tương tự Production):
+```powershell
+# Sử dụng npm script (Khuyên dùng):
+npm run docker:dev:build
+
+# Hoặc lệnh Docker Compose CLI trực tiếp tương đương:
+docker compose --env-file .env.dev -f docker-compose.dev.yml --profile monitoring up -d --build
+```
+> **Giải thích:** Cờ `--build` sẽ tự động build lại Docker image mới nhất của NestJS API & PostgreSQL (pgAudit), sau đó cờ `-d` (detached) sẽ khởi chạy ngầm tất cả các service (API, DB, Redis, RedisInsight, Grafana, Prometheus, Loki, Alloy, Redis Exporter) trong 1 lệnh duy nhất.
+
+#### 2. Các lệnh khởi động khác khi không cần build lại:
+```powershell
+# Chạy toàn bộ (kèm monitoring) khi images đã build sẵn:
+npm run docker:dev:full
+
+# Chỉ chạy Core Services (API + DB + Redis + RedisInsight, không bật monitoring):
+npm run docker:dev
+
+# Hoặc dùng batch script tự động (tự clean -> build -> start -> check health):
+.\start-docker.bat
+```
+
+### Cách B: DB/Redis trong Docker + NestJS trên host
+
+Phù hợp cho debug, hot reload nhanh hơn.
 
 ```powershell
 # Chỉ khởi động PostgreSQL và Redis
-docker compose --env-file .env.dev -f docker-compose.dev.yml up -d postgres_db redis
+docker compose --env-file .env.dev -f docker-compose-infrastructure.yml up -d
 ```
 
-**Kiểm tra trạng thái:**
+Kiểm tra trạng thái:
+```powershell
+docker compose -f docker-compose-infrastructure.yml ps
+```
+
+Sau đó chạy NestJS trên host:
+```powershell
+$env:NODE_ENV = 'development'
+npm run migration:run
+npm run start:dev
+```
+
+### Cách C: Docker + monitoring ở background
 
 ```powershell
-docker compose -f docker-compose.dev.yml ps
-```
+# Khởi động monitoring stack ở background
+npm run docker:dev:monitoring
 
-Kết quả dự kiến:
-```
-NAME           STATUS
-postgres_db    Up (healthy)
-redis          Up (healthy)
+# Sau đó start API
+npm run docker:dev
 ```
 
 ## 4. Chạy Migration
 
 ```powershell
-# Set NODE_ENV để migration CLI đọc .env.dev
+# Nếu chạy NestJS trên host
 $env:NODE_ENV = 'development'
-
-# Chạy migration
 npm run migration:run
 ```
 
-**Kiểm tra migration:**
+> **Lưu ý:** Khi chạy full Docker (Cách A), migration được chạy tự động khi app khởi động qua TypeORM synchronize (dev mode) hoặc bạn cần exec vào container.
 
+Kiểm tra migration:
 ```powershell
 npm run migration:show
 ```
 
-## 5. Chạy Application
-
-```powershell
-# Development mode với hot reload
-npm run start:dev
-```
-
-Application sẽ chạy ở `http://localhost:3000`
-
-## 6. Xác minh hoạt động
+## 5. Xác minh hoạt động
 
 ### Health checks
 
 ```powershell
 # Liveness
-Invoke-RestMethod http://localhost:3000/health/live
+Invoke-RestMethod http://localhost:3317/health/live
 
 # Readiness (kiểm tra PostgreSQL và Redis)
-Invoke-RestMethod http://localhost:3000/health/ready
+Invoke-RestMethod http://localhost:3317/health/ready
 ```
+
+> **Lưu ý:** Port mặc định trong `.env.dev` là `3317`, không phải `3000`.
 
 ### Access Swagger (nếu đã bật)
 
-Truy cập: `http://localhost:3000/api-docs`
+Truy cập: `http://localhost:3317/api-docs`
 
-Đăng nhập với:
-- Username: `local-docs`
-- Password: (giá trị `SWAGGER_PASSWORD` trong `.env.dev`)
+Đăng nhập với username/password từ `SWAGGER_USERNAME` / `SWAGGER_PASSWORD` trong `.env.dev`.
 
-## 7. Công cụ phát triển
+### Access Grafana (nếu bật monitoring)
+
+Truy cập: `http://localhost:3001`
+
+Đăng nhập với `GRAFANA_ADMIN_USER` / `GRAFANA_ADMIN_PASSWORD` từ `.env.dev`.
+
+**3 Dashboard có sẵn:**
+
+| Dashboard | Mô tả |
+|-----------|--------|
+| NestJS API – Metrics | Request rate, latency P50/P95/P99, error rate, cache hit, queue depth |
+| NestJS API – Audit Logs | Audit events, security events, pgAudit database logs |
+| NestJS API – Application Logs | Pino logs, log volume by level, error logs, PostgreSQL/Redis logs |
+
+## 6. Công cụ phát triển
 
 ### Build và test
 
@@ -140,9 +192,6 @@ npm run test:e2e
 
 # Lint code
 npm run lint
-
-# Security audit
-npm audit
 ```
 
 ### Generate migration mới
@@ -161,7 +210,14 @@ $env:NODE_ENV = 'development'
 npm run migration:revert
 ```
 
-## 8. Cấu trúc dự án
+### Tạo admin user
+
+```powershell
+# Dev mode (trên host)
+npm run bootstrap:admin:dev
+```
+
+## 7. Cấu trúc dự án
 
 ```
 src/
@@ -183,82 +239,56 @@ src/
 └── main.ts             # Entry point
 ```
 
-## 9. Workflow phát triển
+## 8. Port mapping
 
-### Tạo feature mới
+### Khi chạy full Docker (Cách A)
 
-```powershell
-# Tạo module mới với NestJS CLI
-npx nest g resource modules/feature-name
+| Service | Host Port | Container Port | Access |
+|---------|-----------|----------------|--------|
+| API | 3317 | 3317 | http://localhost:3317 |
+| PostgreSQL | 3533 | 5432 | localhost:3533 |
+| Swagger | 3317 | 3317 | http://localhost:3317/api-docs |
+| Grafana | 3001 | 3000 | http://localhost:3001 |
 
-# Hoặc thủ công:
-# 1. Tạo entity
-# 2. Generate migration
-# 3. Run migration
-# 4. Tạo DTO
-# 5. Tạo service
-# 6. Tạo controller
-# 7. Đăng ký module
-```
+### Khi chạy infrastructure only (Cách B)
 
-### Thay đổi database schema
+| Service | Host Port | Container Port | Access |
+|---------|-----------|----------------|--------|
+| API (trên host) | 3317 | — | http://localhost:3317 |
+| PostgreSQL | 5433 | 5432 | localhost:5433 |
+| Redis | 6379 | 6379 | localhost:6379 |
 
-1. Sửa entity
-2. Generate migration
-3. Review SQL
-4. Test migration trên database local
-5. Commit migration với code
+> **Lưu ý:** Ports có thể thay đổi qua `.env.dev`. Xem `PORT`, `DB_PUBLISHED_PORT`.
 
-### Debug
-
-```powershell
-# Run với debug mode
-npm run start:debug
-
-# Hoặc dùng VS Code debugger
-# Tạo launch config trong .vscode/launch.json
-```
-
-## 10. Dọn dẹp
+## 9. Dọn dẹp
 
 ### Dừng services
 
 ```powershell
-# Dừng và giữ data
-docker compose -f docker-compose.dev.yml down
+# Dừng tất cả (bao gồm monitoring) và giữ data
+npm run docker:dev:remove
 
 # Dừng và xóa data volumes
-docker compose -f docker-compose.dev.yml down -v
+docker compose --env-file .env.dev -f docker-compose.dev.yml --profile monitoring down -v
 ```
 
-### Xóa node_modules
+### Dọn dẹp Docker
 
 ```powershell
-# Windows
-Remove-Item -Recurse -Force node_modules
+# Cleanup unused images
+docker system prune -a
 
-# Linux/Mac
-rm -rf node_modules
+# Cleanup volumes (CAUTION: mất data)
+docker volume prune
 ```
 
-## 11. Port mapping
-
-Khi chạy local:
-
-| Service | Host Port | Container Port | Access |
-|---------|-----------|----------------|--------|
-| API | 3000 | 3000 | http://localhost:3000 |
-| PostgreSQL | 5433 | 5432 | localhost:5433 |
-| Redis | 6379 | 6379 | localhost:6379 |
-| Swagger (nếu bật) | 3000 | 3000 | http://localhost:3000/api-docs |
-
-## 12. Troubleshooting
+## 10. Troubleshooting
 
 ### Port đã được sử dụng
 
 ```powershell
 # Tìm process đang dùng port
-netstat -ano | findstr ":3000"
+netstat -ano | findstr ":3317"
 
 # Kill process hoặc đổi port trong .env.dev
 ```
@@ -266,38 +296,41 @@ netstat -ano | findstr ":3000"
 ### Migration thất bại
 
 ```powershell
-# Xem log migration
 npm run migration:show
-
-# Kiểm tra database connection
-docker logs postgres_db
+docker logs postgres_dev
 ```
 
 ### Docker không chạy
 
 ```powershell
-# Kiểm tra Docker status
 docker ps
-
-# Restart Docker Desktop
+# Nếu lỗi → Restart Docker Desktop
 ```
 
 ### TypeORM sync error
 
 Kiểm tra `DB_HOST` trong `.env.dev`:
-- Khi chạy migration từ host: `localhost`
-- Khi chạy trong Docker: `postgres_db`
+- Khi chạy migration từ host: `localhost` (port `3533` hoặc `DB_PUBLISHED_PORT`)
+- Khi chạy trong Docker: `postgres_db` (port `5432`)
 
-## 13. Mẹo
+### Monitoring không hiển thị data
 
-- **Hot reload**: Chỉnh sửa code trong `src/` sẽ tự động reload
-- **Environment**: Luôn dùng `.env.dev` cho local, không commit
-- **Secrets**: Không bao giờ commit secrets thật
+1. Kiểm tra API có expose `/metrics`: `curl http://localhost:3317/metrics`
+2. Kiểm tra `ENABLE_METRICS=true` trong `.env.dev`
+3. Kiểm tra `LOG_FORMAT=json` (Alloy cần JSON logs)
+4. Chờ 15-30 giây để Prometheus scrape và Loki ingest
+
+## 11. Mẹo
+
+- **Hot reload**: Chỉnh sửa code trong `src/` sẽ tự động reload (Docker mount volumes)
+- **Environment**: Luôn dùng `.env.dev` cho local, không commit secrets thật
 - **Testing**: Run test trước khi commit
 - **Migration**: Review migration SQL trước khi apply
+- **Monitoring**: Bật `--profile monitoring` để có Grafana dashboards giống production
 
 ## Tài liệu liên quan
 
 - [Docker Setup](docker-setup.md)
 - [Configuration](../05-CAU-HINH/environment-variables.md)
 - [Architecture](../02-CODE-CHUC-NANG/architecture.md)
+- [Observability](../06-OBSERVABILITY/)

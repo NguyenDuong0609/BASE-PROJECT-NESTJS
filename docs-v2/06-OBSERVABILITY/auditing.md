@@ -1,576 +1,152 @@
-# Auditing
+# Auditing & Security Logs
 
-Ghi log audit events để theo dõi các hoạt động quan trọng trong hệ thống.
+Tài liệu về hệ thống kiểm toán (Auditing) bao gồm Application Audit Events, Cơ chế lưu trữ PostgreSQL, pgAudit, và trực quan hóa qua Grafana.
 
-## Tổng quan
+---
 
-- **Database**: PostgreSQL `audit_events` table
-- **Extension**: pgAudit (tùy chọn)
-- **Access**: Admin only
-- **Purpose**: Security, compliance, troubleshooting
-- **Feature Flag**: `ENABLE_PGAUDIT=true`
+## 1. Tổng quan Kiến trúc Auditing (3 Tầng Kiểm Toán)
 
-## Audit Events
+Hệ thống triển khai mô hình kiểm toán toàn diện 3 tầng (3-tier Auditing):
 
-### Event Types
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                             Kiến Trúc Kiểm Toán                             │
+├──────────────────────┬──────────────────────────┬───────────────────────────┤
+│ 1. API Request Audit │ 2. Application Audit     │ 3. Database Audit (pgAudit)│
+├──────────────────────┼──────────────────────────┼───────────────────────────┤
+│ HTTP Access & Trace  │ Business & Security Ops  │ SQL DDL/DML Engine Logs   │
+│ - Request ID & IP    │ - User Lifecycle         │ - Schema mutations        │
+│ - Method & Route     │ - Role / Permission chg  │ - Table inserts/updates   │
+│ - Status Code        │ - Auth login/logout      │ - Direct DB connections   │
+│ - Response time (ms) │ - Lưu DB + Emit Loki     │ - PostgreSQL Extension    │
+└──────────────────────┴──────────────────────────┴───────────────────────────┘
+```
 
-| Event Type | Description | Category |
-|------------|-------------|----------|
-| `auth.sign_up` | User registered | Authentication |
-| `auth.sign_in` | User logged in | Authentication |
-| `auth.sign_in_failed` | Login failed | Authentication |
-| `auth.sign_out` | User logged out | Authentication |
-| `auth.password_reset_requested` | Password reset requested | Authentication |
-| `auth.password_reset_completed` | Password reset completed | Authentication |
-| `auth.email_verified` | Email verified | Authentication |
-| `user.created` | User created | User Management |
-| `user.updated` | User updated | User Management |
-| `user.deleted` | User deleted | User Management |
-| `user.role_changed` | User role changed | User Management |
-| `user.password_changed` | Password changed | User Management |
-| `role.created` | Role created | RBAC |
-| `role.updated` | Role updated | RBAC |
-| `role.deleted` | Role deleted | RBAC |
-| `checkin.completed` | Daily check-in | Check-in |
-| `media.uploaded` | File uploaded | Media |
-| `media.deleted` | File deleted | Media |
+1. **Tầng 1: API Request Audit Logs (HTTP Access Logs)**:
+   - Ghi nhận mọi HTTP request đi vào hệ thống qua `nestjs-pino`: Method, URL, Status Code, Response Time, Client IP, Request ID, User ID, User Agent.
+   - Lưu trữ tự động tại Loki dưới nhãn `{service="api", context="HTTP"}`.
+2. **Tầng 2: Application Audit Events (Nghiệp vụ ứng dụng & An ninh)**:
+   - Bản ghi kiểm toán do `AuditLogService` quản lý: lưu trữ bảng PostgreSQL `audit_events` và đồng thời emit log có cấu trúc `{event="audit_event"}`.
+3. **Tầng 3: Database Engine Audit (PostgreSQL pgAudit)**:
+   - Giám sát toàn bộ câu lệnh SQL DDL và DML cấp cơ sở dữ liệu qua extension pgAudit.
 
-## Audit Entity
+---
 
-### AuditEvent Entity
+## 2. Thực thể AuditEvent (`audit-event.entity.ts`)
 
+Định nghĩa bảng `audit_events` tại [src/observability/audit-event.entity.ts](file:///d:/Project_AI/Project_Base_NestJS_V3/src/observability/audit-event.entity.ts):
+
+| Cột | Kiểu | Mô tả |
+|---|---|---|
+| `id` | `UUID` (Primary Key) | Mã định danh duy nhất của sự kiện kiểm toán |
+| `event_type` | `varchar(20)` | Phân loại: `'security'` hoặc `'business'` |
+| `action` | `varchar(80)` | Hành động cụ thể (ví dụ: `AUTH_SIGN_IN`, `USER_DELETED`) |
+| `actor_user_id` | `UUID`, nullable | User thực hiện hành động |
+| `subject_user_id` | `UUID`, nullable | User là đối tượng bị tác động |
+| `resource_type` | `varchar(80)`, nullable | Loại thực thể (ví dụ: `User`, `Role`, `FlashCard`) |
+| `resource_id` | `varchar(255)`, nullable | Khóa chính của thực thể bị tác động |
+| `metadata` | `JSONB` | Dữ liệu ngữ cảnh đi kèm (tối đa 20 trường, không chứa dữ liệu nhạy cảm) |
+| `created_at` | `timestamp with time zone` | Thời điểm ghi nhận sự kiện |
+
+### Chỉ mục phục vụ truy vấn tốc độ cao (Indexes)
+- `IDX_audit_events_subject_created`: `(subject_user_id, created_at)`
+- `IDX_audit_events_actor_created`: `(actor_user_id, created_at)`
+- `IDX_audit_events_action_created`: `(action, created_at)`
+- `IDX_audit_events_type_created`: `(event_type, created_at)`
+- `IDX_audit_events_created_at`: `(created_at)`
+
+---
+
+## 3. AuditLogService
+
+Cung cấp các hàm chuẩn tại [src/observability/audit-log.service.ts](file:///d:/Project_AI/Project_Base_NestJS_V3/src/observability/audit-log.service.ts):
+
+### 3.1. Ghi nhận sự kiện kiểm toán
 ```typescript
-@Entity('audit_events')
-export class AuditEvent {
-  @PrimaryGeneratedColumn('uuid')
-  id: string;
-
-  @Column()
-  eventType: string;
-
-  @Column()
-  action: string;
-
-  @Column({ nullable: true })
-  userId: string;
-
-  @Column({ nullable: true })
-  userEmail: string;
-
-  @Column({ nullable: true })
-  resourceType: string;
-
-  @Column({ nullable: true })
-  resourceId: string;
-
-  @Column('jsonb', { nullable: true })
-  metadata: Record<string, any>;
-
-  @Column({ nullable: true })
-  ipAddress: string;
-
-  @Column({ nullable: true })
-  userAgent: string;
-
-  @CreateDateColumn()
-  createdAt: Date;
-
-  @Index()
-  @Column()
-  eventDate: Date;  // For efficient date queries
-}
+await this.auditLogService.record(
+  'AUTH_LOGIN_SUCCESS', // Action name (nếu bắt đầu bằng AUTH_ hoặc ACCOUNT_ sẽ tự động là 'security')
+  user.id,              // subjectUserId
+  user.id,              // actorUserId
+  { ip: req.ip, userAgent: req.headers['user-agent'] }, // metadata
+);
 ```
 
-### Indexes
-
-```sql
-CREATE INDEX idx_audit_events_userId ON audit_events(userId);
-CREATE INDEX idx_audit_events_resource ON audit_events(resourceType, resourceId);
-CREATE INDEX idx_audit_events_eventType ON audit_events(eventType);
-CREATE INDEX idx_audit_events_eventDate ON audit_events(eventDate);
-```
-
-## Audit Service
-
-### Audit Service Implementation
-
+Hoặc sử dụng phương thức chi tiết `recordEvent`:
 ```typescript
-// src/observability/audit/audit.service.ts
-import { Injectable } from '@nestjs/common';
-import { InjectRepository } from '@nestjs/typeorm';
-import { Repository } from 'typeorm';
-import { AuditEvent } from './audit-event.entity';
-import { Request } from 'express';
-
-@Injectable()
-export class AuditService {
-  constructor(
-    @InjectRepository(AuditEvent)
-    private auditRepository: Repository<AuditEvent>,
-  ) {}
-
-  async log(options: {
-    eventType: string;
-    action: string;
-    userId?: string;
-    userEmail?: string;
-    resourceType?: string;
-    resourceId?: string;
-    metadata?: Record<string, any>;
-    ipAddress?: string;
-    userAgent?: string;
-  }) {
-    const auditEvent = this.auditRepository.create({
-      ...options,
-      eventDate: new Date(),
-    });
-
-    await this.auditRepository.save(auditEvent);
-  }
-
-  async logAuthentication(
-    eventType: string,
-    userId: string,
-    metadata?: Record<string, any>,
-  ) {
-    return this.log({
-      eventType,
-      action: eventType,
-      userId,
-      resourceType: 'User',
-      resourceId: userId,
-      metadata,
-    });
-  }
-
-  async logUserAction(
-    eventType: string,
-    userId: string,
-    resourceType: string,
-    resourceId: string,
-    metadata?: Record<string, any>,
-  ) {
-    return this.log({
-      eventType,
-      action: eventType,
-      userId,
-      resourceType,
-      resourceId,
-      metadata,
-    });
-  }
-}
-```
-
-## Usage in Controllers
-
-### Authentication Controller
-
-```typescript
-// src/modules/auth/auth.controller.ts
-@Controller('auth')
-export class AuthController {
-  constructor(
-    private authService: AuthService,
-    private auditService: AuditService,
-  ) {}
-
-  @Post('sign-in')
-  async signIn(@Body() dto: SignInDto, @Req() req: Request) {
-    const result = await this.authService.signIn(dto);
-
-    // Log successful login
-    await this.auditService.logAuthentication('auth.sign_in', result.user.id, {
-      ipAddress: req.ip,
-      userAgent: req.headers['user-agent'],
-    });
-
-    return result;
-  }
-
-  @Post('sign-in-failed')
-  async signInFailed(@Body() dto: SignInDto, @Req() req: Request) {
-    // Log failed login attempt
-    await this.auditService.log({
-      eventType: 'auth.sign_in_failed',
-      action: 'auth.sign_in_failed',
-      metadata: {
-        email: dto.email,
-        ipAddress: req.ip,
-        userAgent: req.headers['user-agent'],
-      },
-    });
-
-    throw new UnauthorizedException('Invalid credentials');
-  }
-}
-```
-
-### Users Controller
-
-```typescript
-// src/modules/users/users.controller.ts
-@Controller('users')
-export class UsersController {
-  constructor(
-    private usersService: UsersService,
-    private auditService: AuditService,
-  ) {}
-
-  @Delete(':id')
-  @Roles('Admin')
-  async deleteUser(@Param('id') id: string, @CurrentUser() currentUser: User) {
-    const result = await this.usersService.delete(id);
-
-    // Log deletion
-    await this.auditService.logUserAction(
-      'user.deleted',
-      currentUser.id,
-      'User',
-      id,
-      {
-        deletedBy: currentUser.email,
-        deletedAt: new Date().toISOString(),
-      },
-    );
-
-    return result;
-  }
-}
-```
-
-## Audit API Endpoints
-
-### GET /audit/events
-
-Filter audit events (Admin only).
-
-**Query params:**
-- `eventType` - Filter by event type
-- `action` - Filter by action
-- `userId` - Filter by user ID
-- `resourceType` - Filter by resource type
-- `resourceId` - Filter by resource ID
-- `limit` - Items per page (default: 50, max: 500)
-- `offset` - Pagination offset
-
-**Response 200:**
-```json
-{
-  "success": true,
-  "data": [
-    {
-      "id": "uuid",
-      "eventType": "auth.sign_in",
-      "action": "auth.sign_in",
-      "userId": "uuid",
-      "userEmail": "user@example.com",
-      "resourceType": "User",
-      "resourceId": "uuid",
-      "metadata": {
-        "ipAddress": "192.168.1.1",
-        "userAgent": "Mozilla/5.0..."
-      },
-      "ipAddress": "192.168.1.1",
-      "userAgent": "Mozilla/5.0...",
-      "createdAt": "2026-10-10T10:00:00.000Z",
-      "eventDate": "2026-10-10"
-    }
-  ],
-  "meta": {
-    "limit": 50,
-    "offset": 0,
-    "total": 1000
-  }
-}
-```
-
-**Auth:** Admin
-
-### GET /audit/user/:userId
-
-Get audit events for specific user (Admin only).
-
-**Response 200:**
-```json
-{
-  "success": true,
-  "data": [...]
-}
-```
-
-**Auth:** Admin
-
-### GET /audit/resource/:resourceType/:resourceId
-
-Get audit events for specific resource (Admin only).
-
-**Response 200:**
-```json
-{
-  "success": true,
-  "data": [...]
-}
-```
-
-**Auth:** Admin
-
-## pgAudit Integration
-
-### Setup pgAudit
-
-**Docker Compose:**
-
-```yaml
-# docker-compose.prod.yml
-postgres_db:
-  image: postgres:15-alpine
-  environment:
-    POSTGRES_DB: ${DB_DATABASE}
-    POSTGRES_USER: ${DB_USERNAME}
-    POSTGRES_PASSWORD: ${DB_PASSWORD}
-    POSTGRES_INITDB_ARGS: "-c shared_preload_libraries=pgaudit"
-  volumes:
-    - ./postgres.conf:/etc/postgresql/postgresql.conf
-    - postgres_data:/var/lib/postgresql/data
-```
-
-**postgres.conf:**
-
-```ini
-shared_preload_libraries = 'pgaudit'
-pgaudit.log = 'all'
-pgaudit.log_client = on
-pgaudit.log_level = 'info'
-```
-
-### pgAudit Events
-
-pgAudit logs:
-
-- All DDL statements (CREATE, ALTER, DROP)
-- All DML statements (INSERT, UPDATE, DELETE)
-- Role changes
-- Grant/Revoke permissions
-
-**Example log:**
-```
-LOG:  AUDIT: SESSION,1,1,READ,SELECT,,public.users,none
-LOG:  AUDIT: SESSION,1,1,WRITE,INSERT,,public.users,none
-```
-
-## Retention Policy
-
-### Database Retention
-
-```sql
--- Archive old events (older than 90 days)
-DELETE FROM audit_events 
-WHERE eventDate < NOW() - INTERVAL '90 days';
-
--- Or partition by month
-```
-
-### Log Aggregation
-
-Send audit logs to central logging:
-
-```typescript
-// Send to Loki
-this.logger.info('AUDIT_EVENT', {
-  eventType: 'user.deleted',
-  userId: currentUser.id,
-  // ... other fields
+await this.auditLogService.recordEvent({
+  eventType: 'security',
+  action: 'ROLE_ASSIGNED',
+  actorUserId: adminUser.id,
+  subjectUserId: targetUser.id,
+  resourceType: 'Role',
+  resourceId: roleId,
+  metadata: { roleName: 'Admin' },
 });
 ```
 
-## Security Considerations
+### 3.2. Quy tắc an toàn dữ liệu Metadata (Data Sanitization)
+`AuditLogService` tự động chặn lỗi nếu metadata vi phạm:
+1. Số lượng khóa tối đa: **20 keys**.
+2. **Nghiêm cấm các khóa nhạy cảm**: Khóa không được chứa chuỗi: `password`, `token`, `secret`, `authorization`, `cookie`, `credential`, `email`, `phone`, `address`, `body`, `old_value`, `new_value`, `query`.
+3. Kiểu giá trị hợp lệ: Chỉ chấp nhận `string` (<= 512 chars), `number`, `boolean`, hoặc `null`.
 
-### 1. Admin-Only Access
+### 3.3. Chính sách lưu trữ & Dọn dẹp tự động (Retention Policy)
+- Cấu hình qua biến môi trường: `AUDIT_RETENTION_DAYS` (ví dụ: `90`).
+- Nếu `AUDIT_RETENTION_DAYS > 0`, service tự động chạy cron job mỗi 24 giờ xóa theo batch 5,000 bản ghi các sự kiện cũ hơn thời hạn quy định.
 
-```typescript
-@UseGuards(JwtAccessTokenGuard, RolesGuard)
-@Roles('Admin')
-@Controller('audit')
-export class AuditController {
-  // All endpoints admin-only
-}
-```
+---
 
-### 2. Sensitive Data
+## 4. Tích hợp pgAudit (PostgreSQL Extension)
 
-```typescript
-// ✅ DO: Log minimal metadata
-metadata: {
-  changedFields: ['email', 'role'],
-  ipAddress: req.ip,
-}
+Trong môi trường Docker (cả Dev và Prod):
+1. **Dockerfile**: `docker/postgres/Dockerfile` build từ image PostgreSQL chính thức và cài đặt gói `postgresql-15-pgaudit`.
+2. **Kích hoạt qua Docker Compose**:
+   ```yaml
+   command:
+     - postgres
+     - -c
+     - shared_preload_libraries=pgaudit
+     - -c
+     - pgaudit.log=write,ddl,role
+     - -c
+     - pgaudit.log_parameter=off
+     - -c
+     - pgaudit.log_relation=on
+     - -c
+     - log_line_prefix=%m [%p] user=%u,db=%d,app=%a,client=%h
+   ```
+3. Nhật ký pgAudit xuất hiện trực tiếp trong container stdout của `postgres_db` và được Grafana Alloy thu thập tự động.
 
-// ❌ DON'T: Log sensitive data
-metadata: {
-  password: user.password,
-  token: user.token,
-}
-```
+---
 
-### 3. Immutable Records
+## 5. Pre-configured Grafana Dashboard
 
-```typescript
-// Audit records should never be updated
-@Entity()
-export class AuditEvent {
-  @CreateDateColumn({ readonly: true })
-  createdAt: Date;
+Dự án tích hợp sẵn dashboard [nestjs-audit-logs.json](file:///d:/Project_AI/Project_Base_NestJS_V3/observability/grafana/dashboards/nestjs-audit-logs.json) trong Grafana:
 
-  @UpdateDateColumn({ readonly: true })
-  updatedAt: Date;  // Should never change
-}
-```
+### Cấu trúc Dashboard (4 Khối Kiểm Toán):
 
-### 4. Timestamps
+#### 📌 Khối Tổng quan (Overview Stats)
+- **Total API Requests**: Tổng số request trong 1 giờ qua (`sum(count_over_time({service="api", context="HTTP"} [1h]))`).
+- **API Errors (4xx/5xx)**: Số lượng request lỗi client hoặc server.
+- **Application Audit Events**: Tổng số sự kiện nghiệp vụ được ghi nhận.
+- **Database pgAudit Logs**: Tổng số câu lệnh DDL/DML đã ghi nhận ở tầng PostgreSQL.
 
-```typescript
-// Use server time, not client time
-eventDate: new Date();
+#### 🌐 Khối 1: API Request Audit Logs (HTTP Access)
+- **All API Request Logs (Real-time Stream)**: `{service="api", context="HTTP"} | json`
+  - Hiển thị: Timestamp, HTTP Method (`GET`, `POST`,...), URL path, Status code (`200`, `401`, `500`), Response time (ms), Request ID, Remote IP, User Agent.
+- **API Request Rate by Status Code**: Biểu đồ phân bổ tỷ lệ request theo mã trạng thái HTTP theo thời gian.
+- **API Request Errors & Warnings**: Lọc riêng các request bị lỗi (`res_statusCode >= 400`).
 
-// Don't use
-eventDate: new Date(clientTimestamp);
-```
+#### 📋 Khối 2: Application Audit Events (Nghiệp vụ)
+- **Application Audit Events**: `{service="api"} |= "audit_event" | json | event = "audit_event"`
+  - Hiển thị: `action`, `eventType`, `actorUserId`, `subjectUserId`, `resourceType`, `resourceId`.
+- **Audit Events by Action**: Biểu đồ tần suất hành động (`USER_CREATED`, `AUTH_LOGIN`,...).
+- **Audit Events by Type**: Biểu đồ tròn tỷ lệ giữa `security` và `business`.
 
-## Compliance
+#### 🔐 Khối 3: Security Audit Events (Xác thực & Bảo mật)
+- **Security Events Stream**: `{service="api"} |= "audit_event" | json | event = "audit_event" | eventType = "security"`
+  - Giám sát các sự kiện nhạy cảm: `AUTH_*`, `ACCOUNT_*`, đổi mật khẩu, phân quyền.
 
-### GDPR Requirements
-
-- Right to access: Users can request their audit trail
-- Right to deletion: Audit records may need anonymization
-- Data portability: Export audit data for users
-
-### SOC 2 Requirements
-
-- Audit trails for privileged access
-- Immutable audit logs
-- Regular review of audit logs
-- Alert on suspicious activity
-
-## Best Practices
-
-### 1. Log Important Events Only
-
-```typescript
-// ✅ DO: Log important events
-await this.auditService.logUserAction('user.deleted', userId, 'User', id);
-
-// ❌ DON'T: Log every read operation
-await this.auditService.logUserAction('user.read', userId, 'User', id);
-```
-
-### 2. Include Context
-
-```typescript
-// Include actor information
-await this.auditService.log({
-  eventType: 'user.updated',
-  action: 'user.updated',
-  userId: currentUser.id,
-  actorId: currentUser.id,
-  actorEmail: currentUser.email,
-  metadata: {
-    changedFields: getChangedFields(oldUser, newUser),
-  },
-});
-```
-
-### 3. Use Structured Metadata
-
-```typescript
-// ✅ DO: Structured metadata
-metadata: {
-  oldRole: 'User',
-  newRole: 'Admin',
-  changedBy: 'admin@example.com',
-}
-
-// ❌ DON'T: String description
-metadata: 'Changed role from User to Admin by admin@example.com'
-```
-
-### 4. Index for Queries
-
-```sql
--- Index for common queries
-CREATE INDEX idx_audit_events_userId_eventDate 
-ON audit_events(userId, eventDate);
-
-CREATE INDEX idx_audit_events_resource_eventDate 
-ON audit_events(resourceType, resourceId, eventDate);
-```
-
-## Query Examples
-
-### User Activity
-
-```sql
-SELECT * FROM audit_events
-WHERE userId = 'user-uuid'
-ORDER BY eventDate DESC
-LIMIT 100;
-```
-
-### Resource History
-
-```sql
-SELECT * FROM audit_events
-WHERE resourceType = 'User'
-  AND resourceId = 'user-uuid'
-ORDER BY eventDate DESC;
-```
-
-### Failed Login Attempts
-
-```sql
-SELECT * FROM audit_events
-WHERE eventType = 'auth.sign_in_failed'
-  AND eventDate > NOW() - INTERVAL '1 day'
-ORDER BY eventDate DESC;
-```
-
-### Admin Actions
-
-```sql
-SELECT * FROM audit_events
-WHERE eventType LIKE '%.deleted'
-  OR eventType LIKE '%.updated'
-ORDER BY eventDate DESC;
-```
-
-## Troubleshooting
-
-### Events not being logged
-
-**Check:**
-- Audit service called
-- Database connection
-- Service registered in module
-- No exceptions in audit code
-
-### Query performance slow
-
-**Solution:**
-- Add composite indexes
-- Partition by date
-- Archive old records
-- Reduce retention period
-
-### Missing events
-
-**Check:**
-- All actions call audit service
-- Exception handling in audit service
-- Transaction rolled back
-
-## Tài liệu liên quan
-
-- [Observability Overview](README.md)
-- [Logging](logging.md)
-- [Monitoring](monitoring.md)
-- [Configuration](../05-CAU-HINH/environment-variables.md)
+#### 🐘 Khối 4: Database Audit Logs (PostgreSQL pgAudit)
+- **PostgreSQL pgAudit SQL Logs**: `{service="postgres_db"} |= "AUDIT"`
+  - Chi tiết từng câu lệnh SQL DDL và DML cấp cơ sở dữ liệu.

@@ -14,11 +14,24 @@ interface HttpMetric {
 type CacheResult = 'hit' | 'miss' | 'bypass' | 'error';
 type QueueState = 'waiting' | 'active' | 'completed' | 'failed' | 'delayed';
 
+interface DbPoolMetrics {
+	active: number;
+	idle: number;
+	total: number;
+	waiting: number;
+}
+
 @Injectable()
 export class MetricsRegistry {
 	private readonly httpMetrics = new Map<string, HttpMetric>();
 	private readonly cacheMetrics = new Map<string, number>();
 	private readonly queueDepths = new Map<string, number>();
+	private dbPoolMetrics: DbPoolMetrics = {
+		active: 0,
+		idle: 0,
+		total: 0,
+		waiting: 0,
+	};
 
 	recordHttpRequest(
 		method: string,
@@ -54,6 +67,15 @@ export class MetricsRegistry {
 	setQueueDepth(queue: string, state: QueueState, count: number): void {
 		const key = JSON.stringify([queue, state]);
 		this.queueDepths.set(key, count);
+	}
+
+	setDbPoolMetrics(
+		active: number,
+		idle: number,
+		total: number,
+		waiting: number,
+	): void {
+		this.dbPoolMetrics = { active, idle, total, waiting };
 	}
 
 	renderPrometheus(): string {
@@ -103,6 +125,26 @@ export class MetricsRegistry {
 				`app_queue_jobs{queue="${this.escapeLabel(queue)}",state="${state}"} ${count}`,
 			);
 		}
+		lines.push(
+			'# HELP db_pool_active_connections Number of active database connections.',
+			'# TYPE db_pool_active_connections gauge',
+			`db_pool_active_connections ${this.dbPoolMetrics.active}`,
+		);
+		lines.push(
+			'# HELP db_pool_idle_connections Number of idle database connections.',
+			'# TYPE db_pool_idle_connections gauge',
+			`db_pool_idle_connections ${this.dbPoolMetrics.idle}`,
+		);
+		lines.push(
+			'# HELP db_pool_max_connections Maximum number of database connections.',
+			'# TYPE db_pool_max_connections gauge',
+			`db_pool_max_connections ${this.dbPoolMetrics.total}`,
+		);
+		lines.push(
+			'# HELP db_pool_waiting_connections Number of clients waiting for a database connection.',
+			'# TYPE db_pool_waiting_connections gauge',
+			`db_pool_waiting_connections ${this.dbPoolMetrics.waiting}`,
+		);
 		return `${lines.join('\n')}\n`;
 	}
 

@@ -6,10 +6,9 @@ Tài liệu này hướng dẫn cách build, deploy và vận hành dự án Nes
 
 1. [Yêu cầu hệ thống](#yêu-cầu-hệ-thống)
 2. [Môi trường phát triển](#môi-trường-phát-triển)
-3. [Môi trường Staging](#môi-trường-staging)
-4. [Môi trường Production](#môi-trường-production)
-5. [CI/CD Pipeline](#cicd-pipeline)
-6. [Troubleshooting](#troubleshooting)
+3. [Môi trường Production](#môi-trường-production)
+4. [CI/CD Pipeline](#cicd-pipeline)
+5. [Troubleshooting](#troubleshooting)
 
 ## Yêu cầu hệ thống
 
@@ -17,107 +16,172 @@ Tài liệu này hướng dẫn cách build, deploy và vận hành dự án Nes
 
 - **Node.js**: >= 24.15.0 (sử dụng cùng major version cho dev, build, runtime)
 - **npm**: đi kèm với Node.js
-- **Docker Desktop/Engine**: cho PostgreSQL, Redis và container hóa
+- **Docker Desktop/Engine**: Docker Compose v2
 - **Git**: cho version control
 
 ### Hardware tối thiểu
 
-- **CPU**: 2 cores
-- **RAM**: 4GB
-- **Disk**: 10GB free space
+| Mục đích | CPU | RAM | Disk |
+|----------|-----|-----|------|
+| Development | 2 cores | 4 GB | 10 GB |
+| Production | 4 cores | 8 GB | 50 GB SSD |
+
+## Cấu trúc Docker Compose
+
+Dự án sử dụng nhiều file Docker Compose cho các mục đích khác nhau:
+
+| File | Mục đích | Profile |
+|------|----------|---------|
+| `docker-compose.dev.yml` | Development – API + DB + Redis + Monitoring | `monitoring` |
+| `docker-compose.prod.yml` | Production – full stack | — |
+| `docker-compose.audit.yml` | Observability stack (Grafana, Loki, Prometheus, Alloy) | `audit-ui` |
+| `docker-compose-infrastructure.yml` | Chỉ DB + Redis (chạy NestJS trên host) | — |
+
+### Multi-stage Dockerfile
+
+```dockerfile
+# Base
+FROM node:24-alpine AS base
+WORKDIR /usr/src/app
+COPY package.json package-lock.json ./
+
+# Development – hot reload
+FROM base AS development
+ENV NODE_ENV=development
+RUN npm ci
+COPY . .
+USER node
+CMD ["npm", "run", "start:dev"]
+
+# Build
+FROM base AS build
+RUN npm ci
+COPY . .
+RUN npm run build
+
+# Production – minimal image
+FROM node:24-alpine AS production
+WORKDIR /usr/src/app
+ENV NODE_ENV=production
+COPY package.json package-lock.json ./
+RUN npm ci --omit=dev && npm cache clean --force
+COPY --from=build --chown=node:node /usr/src/app/dist ./dist
+USER node
+EXPOSE 3000
+CMD ["node", "dist/main.js"]
+```
 
 ## Môi trường phát triển
 
-Phát triển local sử dụng Docker cho PostgreSQL/Redis và chạy NestJS trên máy host.
+Có 2 cách chạy development:
 
-**Ưu điểm:**
-- Hot reload nhanh
-- Debug dễ dàng
-- Dễ thay đổi code
+### Cách 1: Chạy NestJS trên host + DB/Redis trong Docker
+
+Phù hợp khi cần debug trực tiếp, hot reload nhanh.
+
+```powershell
+# Khởi động chỉ PostgreSQL + Redis
+docker compose --env-file .env.dev -f docker-compose-infrastructure.yml up -d
+
+# Cài đặt dependencies
+npm ci
+
+# Chạy migration
+$env:NODE_ENV = 'development'
+npm run migration:run
+
+# Start app với hot reload
+npm run start:dev
+```
+
+### Cách 2: Toàn bộ stack trong Docker (khuyến nghị)
+
+Chạy API + DB + Redis, có thêm monitoring stack giống production.
+
+```powershell
+# Chỉ API + DB + Redis (không monitoring)
+npm run docker:dev
+
+# Với monitoring (Grafana + Prometheus + Loki + Alloy)
+npm run docker:dev:full
+
+# Hoặc start monitoring ở background
+npm run docker:dev:monitoring
+```
+
+Hoặc dùng batch script:
+```powershell
+.\start-docker.bat
+```
 
 **Chi tiết:** Xem [Hướng dẫn phát triển local](local-development.md)
 
-## Môi trường Staging
-
-Môi trường staging gần giống production để test trước khi deploy.
-
-**Đặc điểm:**
-- Chạy trên server riêng
-- Dùng Docker Compose
-- Data test gần giống production
-- Không có dữ liệu thật của user
-
-**Chi tiết:** Xem [Docker Setup](docker-setup.md)
-
 ## Môi trường Production
 
-Môi trường production yêu cầu cấu hình bảo mật chặt chẽ và giám sát đầy đủ.
+Production yêu cầu:
+- File `.env.prod` với secrets thật
+- TLS termination (nginx/traefik) trước API
+- Resource limits cho containers
 
-**Đặc điểm:**
-- Multi-stage Docker image
-- Secrets được bảo vệ
-- Health checks
-- Backup/restore
-- Monitoring & alerting
+```bash
+# Build + deploy
+docker compose --env-file .env.prod -f docker-compose.prod.yml up -d --build
+
+# Với observability stack
+docker compose --env-file .env.prod --profile audit-ui \
+  -f docker-compose.prod.yml -f docker-compose.audit.yml up -d --build
+```
 
 **Chi tiết:** Xem [Production Deploy](production-deploy.md)
 
 ## CI/CD Pipeline
 
-Pipeline tự động hóa build, test và deploy.
-
-**Các bước:**
-1. Lint & Type check
-2. Unit tests
-3. E2E tests
-4. Build Docker image
-5. Security scan
-6. Deploy (manual approval)
+Pipeline tự động hóa (GitLab CI):
+1. **build** – `npm ci` + `npm run build`
+2. **test** – Unit tests, E2E tests, lint, dependency audit
+3. **package** – Build Docker images (API + PostgreSQL pgAudit)
+4. **deploy** – Deploy đến staging/production (manual approval)
 
 **Chi tiết:** Xem [CI/CD Pipeline](ci-cd-pipeline.md)
 
+## NPM Scripts tham khảo nhanh
+
+```powershell
+# ─── Development ──────────────────────────────────
+npm run start:dev              # Hot reload trên host
+npm run docker:dev             # Full Docker (API+DB+Redis)
+npm run docker:dev:full        # Full Docker + monitoring (foreground)
+npm run docker:dev:monitoring  # Start monitoring stack (background)
+npm run docker:dev:remove      # Stop + remove tất cả containers
+
+# ─── Production ───────────────────────────────────
+npm run docker:prod            # Start production stack
+npm run docker:prod:build      # Build production images
+npm run docker:prod:down       # Stop production stack
+npm run docker:prod:logs       # Tail production logs
+
+# ─── Database ─────────────────────────────────────
+npm run migration:run          # Chạy migration
+npm run migration:generate -- src/database/migrations/Name
+npm run migration:revert       # Revert migration cuối
+npm run migration:show         # Xem trạng thái migration
+npm run bootstrap:admin:dev    # Tạo admin user (dev)
+
+# ─── Testing ──────────────────────────────────────
+npm test -- --runInBand        # Unit tests
+npm run test:e2e               # E2E tests
+npm run lint                   # Lint code
+```
+
 ## Troubleshooting
 
-### Lỗi thường gặp
-
 | Lỗi | Nguyên nhân | Giải pháp |
-|-----|------------|-----------|
-| `npm ci` thất bại | Node version không khớp | Kiểm tra `node --version` |
+|-----|-----------|-----------|
+| `npm ci` thất bại | Node version sai | Kiểm tra `node --version` >= 24.15.0 |
 | Docker không chạy | Docker Desktop chưa start | Mở Docker Desktop |
-| Migration thất bại | Database chưa sẵn sàng | Chờ PostgreSQL healthy |
-| Port conflict | Port đang được dùng | Thay đổi port trong .env |
-
-### Log location
-
-- **Application logs**: Console/stdout
-- **PostgreSQL logs**: Docker logs
-- **Redis logs**: Docker logs
-- **Nginx/Proxy logs**: Nếu có reverse proxy
-
-## Tham khảo nhanh
-
-```bash
-# Local development
-npm ci
-npm run start:dev
-
-# Build
-npm run build
-
-# Test
-npm test -- --runInBand
-npm run test:e2e
-
-# Docker - Development
-docker compose --env-file .env.dev -f docker-compose.dev.yml up -d
-
-# Docker - Production
-docker compose --env-file .env.prod -f docker-compose.prod.yml up -d --build
-
-# Migration
-npm run migration:run
-npm run migration:generate -- src/database/migrations/ChangeName
-```
+| Migration thất bại | DB chưa healthy | Chờ `docker compose ps` hiện healthy |
+| Port conflict | Port đang dùng | Thay port trong `.env.dev` |
+| Monitoring không hiển thị data | Profile chưa bật | Thêm `--profile monitoring` |
 
 ## Tài liệu liên quan
 
@@ -126,3 +190,4 @@ npm run migration:generate -- src/database/migrations/ChangeName
 - [Production Deploy](production-deploy.md)
 - [CI/CD Pipeline](ci-cd-pipeline.md)
 - [Configuration](../05-CAU-HINH/)
+- [Observability](../06-OBSERVABILITY/)

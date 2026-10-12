@@ -190,16 +190,8 @@ export class CollectionsController {
 	@ApiParam({
 		name: 'id',
 		type: 'string',
-		examples: {
-			migration_id_1: {
-				value: '644293b09150e9f67d9bb75d',
-				description: `Collection Kitchen vocabulary`,
-			},
-			migration_id_2: {
-				value: '6442941027467f9a755ff76d',
-				description: `Collection Sport vocabulary`,
-			},
-		},
+		example: 'c3f68744-8d48-43bf-939e-4e6ad9d7e35b',
+		description: 'Collection ID/UUID',
 	})
 	findOne(
 		@Param('id', ParseUUIDPipe) id: string,

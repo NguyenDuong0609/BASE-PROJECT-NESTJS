@@ -1,5 +1,10 @@
 import { Controller, Post, Get, UseGuards } from '@nestjs/common';
-import { ApiTags, ApiOperation, ApiBearerAuth, ApiQuery } from '@nestjs/swagger';
+import {
+	ApiTags,
+	ApiOperation,
+	ApiBearerAuth,
+	ApiQuery,
+} from '@nestjs/swagger';
 import { CheckinService } from './checkin.service';
 import { CurrentUserId } from 'src/decorators/current-user.decorator';
 import { JwtAccessTokenGuard } from '@modules/auth/guards/jwt-access-token.guard';

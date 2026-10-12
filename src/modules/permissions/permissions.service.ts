@@ -1,8 +1,14 @@
-import { Injectable, NotFoundException } from '@nestjs/common';
+import { Injectable, NotFoundException, Optional } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { EntityManager, In, Repository } from 'typeorm';
 import { Permission } from './entities/permission.entity';
 import { UserRole } from '../user-roles/entities/user-role.entity';
+import { AppCacheService } from '@modules/shared/base/cache/app-cache.service';
+import { AppCacheKeyBuilder } from '@modules/shared/base/cache/app-cache-key.builder';
+import { instanceToPlain } from 'class-transformer';
+
+const PERMISSIONS_CACHE_NAMESPACE = 'permissions';
+const PERMISSIONS_CACHE_TTL_MS = 60_000;
 
 @Injectable()
 export class PermissionsService {
@@ -11,14 +17,39 @@ export class PermissionsService {
 		private readonly permissions: Repository<Permission>,
 		@InjectRepository(UserRole)
 		private readonly roles: Repository<UserRole>,
+		@Optional() private readonly cache?: AppCacheService,
 	) {}
 
 	list() {
-		return this.permissions.find({ order: { code: 'ASC' } });
+		if (!this.cache) {
+			return this.permissions.find({ order: { code: 'ASC' } });
+		}
+		return this.cache.getOrSet(
+			PERMISSIONS_CACHE_NAMESPACE,
+			AppCacheKeyBuilder.build({
+				route: '/permissions',
+				query: {},
+			}),
+			PERMISSIONS_CACHE_TTL_MS,
+			() => this.permissions.find({ order: { code: 'ASC' } }),
+			(val) => val,
+		);
 	}
 
 	listRoles() {
-		return this.roles.find({ order: { name: 'ASC' } });
+		if (!this.cache) {
+			return this.roles.find({ order: { name: 'ASC' } });
+		}
+		return this.cache.getOrSet(
+			PERMISSIONS_CACHE_NAMESPACE,
+			AppCacheKeyBuilder.build({
+				route: '/permissions/roles',
+				query: {},
+			}),
+			PERMISSIONS_CACHE_TTL_MS,
+			() => this.roles.find({ order: { name: 'ASC' } }),
+			(val) => val,
+		);
 	}
 
 	async replaceRolePermissions(
@@ -38,7 +69,10 @@ export class PermissionsService {
 			throw new NotFoundException('One or more permission codes do not exist');
 		}
 		role.permissions = permissions;
-		return roleRepository.save(role);
+		const saved = await roleRepository.save(role);
+		await this.cache?.invalidate(PERMISSIONS_CACHE_NAMESPACE);
+		await this.cache?.invalidate('user-roles');
+		return saved;
 	}
 
 	async hasAll(roleId: string, requiredCodes: string[]): Promise<boolean> {

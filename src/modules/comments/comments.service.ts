@@ -12,6 +12,12 @@ import { Comment } from './entities/comment.entity';
 import { CommentClosure } from './entities/comment-closure.entity';
 import { User } from '@modules/users/entities/user.entity';
 import { createContextLogger } from '../../configs/logger.config';
+import { AppCacheService } from '@modules/shared/base/cache/app-cache.service';
+import { AppCacheKeyBuilder } from '@modules/shared/base/cache/app-cache-key.builder';
+import { instanceToPlain } from 'class-transformer';
+
+const COMMENTS_CACHE_NAMESPACE = 'comments';
+const COMMENTS_CACHE_TTL_MS = 30_000;
 
 interface CreateCommentDto {
 	content: string;
@@ -29,6 +35,7 @@ export class CommentsService {
 		@InjectRepository(CommentClosure)
 		private readonly closureRepository: Repository<CommentClosure>,
 		@Optional() logger?: PinoLogger,
+		@Optional() private readonly cache?: AppCacheService,
 	) {
 		this.logger = createContextLogger(CommentsService.name, logger);
 	}
@@ -37,66 +44,93 @@ export class CommentsService {
 		createDto: CreateCommentDto,
 		authorId: string,
 	): Promise<Comment> {
-		return this.commentRepository.manager.transaction(async (manager) => {
-			const commentRepo = manager.getRepository(Comment);
-			const closureRepo = manager.getRepository(CommentClosure);
+		const created = await this.commentRepository.manager.transaction(
+			async (manager) => {
+				const commentRepo = manager.getRepository(Comment);
+				const closureRepo = manager.getRepository(CommentClosure);
 
-			const comment = commentRepo.create({
-				content: createDto.content,
-				postId: createDto.postId,
-				author: { id: authorId } as User,
-				depth: 0,
-			});
-
-			await commentRepo.save(comment);
-
-			await closureRepo.save({
-				ancestorId: comment.id,
-				descendantId: comment.id,
-				depth: 0,
-			});
-
-			if (createDto.parentId) {
-				const parent = await commentRepo.findOne({
-					where: { id: createDto.parentId },
+				const comment = commentRepo.create({
+					content: createDto.content,
+					postId: createDto.postId,
+					author: { id: authorId } as User,
+					depth: 0,
 				});
 
-				if (!parent) {
-					throw new NotFoundException('Parent comment not found');
-				}
-				if (parent.postId !== createDto.postId) {
-					throw new ForbiddenException(
-						'Reply must belong to the parent comment post',
-					);
-				}
-
-				comment.depth = parent.depth + 1;
 				await commentRepo.save(comment);
 
-				const ancestorClosures = await closureRepo.find({
-					where: { descendantId: createDto.parentId },
+				await closureRepo.save({
+					ancestorId: comment.id,
+					descendantId: comment.id,
+					depth: 0,
 				});
 
-				const newClosures = ancestorClosures.map((ac) =>
-					closureRepo.create({
-						ancestorId: ac.ancestorId,
-						descendantId: comment.id,
-						depth: ac.depth + 1,
-					}),
+				if (createDto.parentId) {
+					const parent = await commentRepo.findOne({
+						where: { id: createDto.parentId },
+					});
+
+					if (!parent) {
+						throw new NotFoundException('Parent comment not found');
+					}
+					if (parent.postId !== createDto.postId) {
+						throw new ForbiddenException(
+							'Reply must belong to the parent comment post',
+						);
+					}
+
+					comment.depth = parent.depth + 1;
+					await commentRepo.save(comment);
+
+					const ancestorClosures = await closureRepo.find({
+						where: { descendantId: createDto.parentId },
+					});
+
+					const newClosures = ancestorClosures.map((ac) =>
+						closureRepo.create({
+							ancestorId: ac.ancestorId,
+							descendantId: comment.id,
+							depth: ac.depth + 1,
+						}),
+					);
+
+					await closureRepo.save(newClosures);
+				}
+
+				this.logger.info(
+					{ commentId: comment.id, authorId, postId: createDto.postId },
+					'Comment created',
 				);
+				return comment;
+			},
+		);
 
-				await closureRepo.save(newClosures);
-			}
-
-			this.logger.info(
-				{ commentId: comment.id, authorId, postId: createDto.postId },
-				'Comment created',
-			);
-			return comment;
-		});
+		await this.cache?.invalidate(COMMENTS_CACHE_NAMESPACE);
+		return created;
 	}
 
 	async getCommentTree(
+		postId: string,
+		offset = 0,
+		limit = 20,
+	): Promise<Comment[]> {
+		if (!this.cache) {
+			return this.fetchCommentTree(postId, offset, limit);
+		}
+
+		return this.cache.getOrSet(
+			COMMENTS_CACHE_NAMESPACE,
+			AppCacheKeyBuilder.build({
+				route: '/comments/posts/:postId',
+				params: { postId },
+				query: { offset, limit },
+			}),
+			COMMENTS_CACHE_TTL_MS,
+			() => this.fetchCommentTree(postId, offset, limit),
+			(val) => instanceToPlain(val),
+		);
+	}
+
+	private async fetchCommentTree(
 		postId: string,
 		offset = 0,
 		limit = 20,
@@ -188,12 +222,14 @@ export class CommentsService {
 
 		const descendants = await this.getCommentDescendants(commentId);
 
-		return this.commentRepository.manager.transaction(async (manager) => {
+		await this.commentRepository.manager.transaction(async (manager) => {
 			const commentRepo = manager.getRepository(Comment);
 			const idsToDelete = [commentId, ...descendants.map((d) => d.id)];
 			await commentRepo.softDelete(idsToDelete);
 			this.logger.info({ commentId }, 'Comment and descendants deleted');
 		});
+
+		await this.cache?.invalidate(COMMENTS_CACHE_NAMESPACE);
 	}
 
 	async updateComment(
@@ -215,6 +251,8 @@ export class CommentsService {
 		}
 
 		comment.content = content;
-		return this.commentRepository.save(comment);
+		const saved = await this.commentRepository.save(comment);
+		await this.cache?.invalidate(COMMENTS_CACHE_NAMESPACE);
+		return saved;
 	}
 }

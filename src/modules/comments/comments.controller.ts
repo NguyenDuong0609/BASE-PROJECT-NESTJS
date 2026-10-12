@@ -61,7 +61,8 @@ export class CommentsController {
 			},
 			comment_2: {
 				value: {
-					content: 'Very helpful for my TOEIC preparation. The examples are clear.',
+					content:
+						'Very helpful for my TOEIC preparation. The examples are clear.',
 				} as CreateRootCommentDto,
 			},
 		},

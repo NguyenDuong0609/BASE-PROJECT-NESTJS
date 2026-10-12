@@ -36,9 +36,17 @@ export class AuditController {
 		example: 'security',
 	})
 	@ApiQuery({ name: 'action', required: false, example: 'USER_CREATED' })
-	@ApiQuery({ name: 'userId', required: false, example: 'c3f68744-8d48-43bf-939e-4e6ad9d7e35b' })
+	@ApiQuery({
+		name: 'userId',
+		required: false,
+		example: 'c3f68744-8d48-43bf-939e-4e6ad9d7e35b',
+	})
 	@ApiQuery({ name: 'resourceType', required: false, example: 'User' })
-	@ApiQuery({ name: 'resourceId', required: false, example: 'c3f68744-8d48-43bf-939e-4e6ad9d7e35b' })
+	@ApiQuery({
+		name: 'resourceId',
+		required: false,
+		example: 'c3f68744-8d48-43bf-939e-4e6ad9d7e35b',
+	})
 	@ApiQuery({ name: 'limit', required: false, type: Number, example: 50 })
 	@ApiQuery({ name: 'offset', required: false, type: Number, example: 0 })
 	findEvents(
@@ -78,7 +86,11 @@ export class AuditController {
 
 	@Get('user')
 	@ApiOperation({ summary: 'Get audit logs by user ID (Admin only)' })
-	@ApiQuery({ name: 'userId', required: true, example: 'c3f68744-8d48-43bf-939e-4e6ad9d7e35b' })
+	@ApiQuery({
+		name: 'userId',
+		required: true,
+		example: 'c3f68744-8d48-43bf-939e-4e6ad9d7e35b',
+	})
 	@ApiQuery({ name: 'limit', required: false, type: Number, example: 50 })
 	@ApiQuery({ name: 'offset', required: false, type: Number, example: 0 })
 	findByUser(
@@ -104,7 +116,11 @@ export class AuditController {
 	@Get('resource')
 	@ApiOperation({ summary: 'Get audit logs by resource (Admin only)' })
 	@ApiQuery({ name: 'resource', required: true, example: 'User' })
-	@ApiQuery({ name: 'resourceId', required: true, example: 'c3f68744-8d48-43bf-939e-4e6ad9d7e35b' })
+	@ApiQuery({
+		name: 'resourceId',
+		required: true,
+		example: 'c3f68744-8d48-43bf-939e-4e6ad9d7e35b',
+	})
 	@ApiQuery({ name: 'limit', required: false, type: Number, example: 50 })
 	@ApiQuery({ name: 'offset', required: false, type: Number, example: 0 })
 	findByResource(

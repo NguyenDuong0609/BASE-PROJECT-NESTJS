@@ -1,16 +1,39 @@
 services:
   loki:
     image: grafana/loki:3.5.5
-    profiles: [audit-ui]
+    profiles: [audit-ui, monitoring]
     command: ['-config.file=/etc/loki/config.yml']
     volumes:
       - ./observability/loki-config.yml:/etc/loki/config.yml:ro
       - loki-data:/loki
     restart: unless-stopped
 
+  redis-exporter:
+    image: oliver006/redis_exporter:v1.67.0-alpine
+    profiles: [audit-ui, monitoring]
+    environment:
+      REDIS_ADDR: redis://redis:6379
+      REDIS_PASSWORD: ${REDIS_PASSWORD:-}
+    depends_on:
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+
+  redisinsight:
+    image: redis/redisinsight:2.68
+    profiles: [audit-ui, redis-ui]
+    ports:
+      - '127.0.0.1:5540:5540'
+    volumes:
+      - redisinsight-data:/data
+    depends_on:
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+
   alloy:
     image: grafana/alloy:v1.11.0
-    profiles: [audit-ui]
+    profiles: [audit-ui, monitoring]
     command:
       - run
       - --server.http.listen-addr=0.0.0.0:12345
@@ -26,7 +49,7 @@ services:
 
   prometheus:
     image: prom/prometheus:v3.5.0
-    profiles: [audit-ui]
+    profiles: [audit-ui, monitoring]
     command:
       - --config.file=/etc/prometheus/prometheus.yml
       - --storage.tsdb.path=/prometheus
@@ -40,7 +63,7 @@ services:
 
   grafana:
     image: grafana/grafana:12.1.1
-    profiles: [audit-ui]
+    profiles: [audit-ui, monitoring]
     environment:
       GF_SECURITY_ADMIN_USER: ${GRAFANA_ADMIN_USER:-admin}
       GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:?GRAFANA_ADMIN_PASSWORD is required}
@@ -63,6 +86,7 @@ volumes:
   grafana-data:
   loki-data:
   prometheus-data:
+  redisinsight-data:
 
 configs:
   prometheus-config:
@@ -76,3 +100,7 @@ configs:
           metrics_path: /metrics
           static_configs:
             - targets: ['api:${PORT:-3000}']
+
+        - job_name: redis
+          static_configs:
+            - targets: ['redis-exporter:9121']

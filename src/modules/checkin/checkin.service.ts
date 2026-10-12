@@ -7,6 +7,12 @@ import { CheckinStats } from './entities/checkin-stats.entity';
 import { User } from '@modules/users/entities/user.entity';
 import { AuditLogService } from '../../observability/audit-log.service';
 import { createContextLogger } from '../../configs/logger.config';
+import { AppCacheService } from '@modules/shared/base/cache/app-cache.service';
+import { AppCacheKeyBuilder } from '@modules/shared/base/cache/app-cache-key.builder';
+import { instanceToPlain } from 'class-transformer';
+
+const CHECKIN_CACHE_NAMESPACE = 'checkin';
+const CHECKIN_CACHE_TTL_MS = 30_000;
 
 export interface CheckinResult {
 	checkin: Checkin;
@@ -26,6 +32,7 @@ export class CheckinService {
 		private readonly dataSource: DataSource,
 		private readonly auditLog: AuditLogService,
 		@Optional() logger?: PinoLogger,
+		@Optional() private readonly cache?: AppCacheService,
 	) {
 		this.logger = createContextLogger(CheckinService.name, logger);
 	}
@@ -34,7 +41,7 @@ export class CheckinService {
 		const today = new Date();
 		today.setHours(0, 0, 0, 0);
 
-		return this.dataSource.manager.transaction(
+		const result = await this.dataSource.manager.transaction(
 			'SERIALIZABLE',
 			async (manager) => {
 				const checkinRepo = manager.getRepository(Checkin);
@@ -127,63 +134,118 @@ export class CheckinService {
 				};
 			},
 		);
+
+		await this.cache?.invalidate(CHECKIN_CACHE_NAMESPACE);
+		return result;
 	}
 
 	async getCheckinHistory(userId: string, limit = 30, offset = 0) {
-		const [items, total] = await this.checkinRepository.findAndCount({
-			where: { userId },
-			order: { checkinDate: 'DESC' },
-			skip: offset,
-			take: limit,
-		});
+		const fetchHistory = async () => {
+			const [items, total] = await this.checkinRepository.findAndCount({
+				where: { userId },
+				order: { checkinDate: 'DESC' },
+				skip: offset,
+				take: limit,
+			});
 
-		return {
-			items,
-			total,
-			limit,
-			offset,
+			return {
+				items,
+				total,
+				limit,
+				offset,
+			};
 		};
+
+		if (!this.cache) {
+			return fetchHistory();
+		}
+
+		return this.cache.getOrSet(
+			CHECKIN_CACHE_NAMESPACE,
+			AppCacheKeyBuilder.build({
+				route: '/checkin/history',
+				scope: { userId },
+				query: { limit, offset },
+			}),
+			CHECKIN_CACHE_TTL_MS,
+			fetchHistory,
+			(val) => instanceToPlain(val),
+		);
 	}
 
 	async getCheckinStats(userId: string): Promise<CheckinStats> {
-		let stats = await this.statsRepository.findOne({
-			where: { user: { id: userId } },
-		});
-
-		if (!stats) {
-			stats = this.statsRepository.create({
-				userId,
-				user: { id: userId } as User,
-				totalCheckins: 0,
-				currentStreak: 0,
-				longestStreak: 0,
-				totalRewards: 0,
+		const fetchStats = async () => {
+			let stats = await this.statsRepository.findOne({
+				where: { user: { id: userId } },
 			});
-			await this.statsRepository.save(stats);
+
+			if (!stats) {
+				stats = this.statsRepository.create({
+					userId,
+					user: { id: userId } as User,
+					totalCheckins: 0,
+					currentStreak: 0,
+					longestStreak: 0,
+					totalRewards: 0,
+				});
+				await this.statsRepository.save(stats);
+			}
+
+			return stats;
+		};
+
+		if (!this.cache) {
+			return fetchStats();
 		}
 
-		return stats;
+		return this.cache.getOrSet(
+			CHECKIN_CACHE_NAMESPACE,
+			AppCacheKeyBuilder.build({
+				route: '/checkin/stats',
+				scope: { userId },
+			}),
+			CHECKIN_CACHE_TTL_MS,
+			fetchStats,
+			(val) => instanceToPlain(val),
+		);
 	}
 
 	async getCheckinStatus(userId: string) {
-		const today = new Date();
-		today.setHours(0, 0, 0, 0);
+		const fetchStatus = async () => {
+			const today = new Date();
+			today.setHours(0, 0, 0, 0);
 
-		const todayCheckin = await this.checkinRepository.findOne({
-			where: {
-				userId,
-				checkinDate: today,
-			},
-		});
+			const todayCheckin = await this.checkinRepository.findOne({
+				where: {
+					userId,
+					checkinDate: today,
+				},
+			});
 
-		const stats = await this.getCheckinStats(userId);
+			const stats = await this.getCheckinStats(userId);
 
-		return {
-			hasCheckedInToday: !!todayCheckin,
-			currentStreak: stats.currentStreak,
-			nextReward: this.calculateRewards(stats.currentStreak + 1),
-			todayCheckin,
+			return {
+				hasCheckedInToday: !!todayCheckin,
+				currentStreak: stats.currentStreak,
+				nextReward: this.calculateRewards(stats.currentStreak + 1),
+				todayCheckin,
+			};
 		};
+
+		if (!this.cache) {
+			return fetchStatus();
+		}
+
+		return this.cache.getOrSet(
+			CHECKIN_CACHE_NAMESPACE,
+			AppCacheKeyBuilder.build({
+				route: '/checkin/status',
+				scope: { userId },
+			}),
+			CHECKIN_CACHE_TTL_MS,
+			fetchStatus,
+			(val) => instanceToPlain(val),
+		);
 	}
 
 	private calculateRewards(streak: number): number {

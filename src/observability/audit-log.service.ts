@@ -1,10 +1,12 @@
-import { Injectable } from '@nestjs/common';
+import { Injectable, Optional as NestOptional } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { PinoLogger } from 'nestjs-pino';
 import { EntityManager, Repository } from 'typeorm';
 import { ConfigService } from '@nestjs/config';
 import { OnModuleDestroy, OnModuleInit } from '@nestjs/common';
 import { AuditEvent } from './audit-event.entity';
+import { AppCacheService } from '@modules/shared/base/cache/app-cache.service';
+import { AppCacheKeyBuilder } from '@modules/shared/base/cache/app-cache-key.builder';
 
 export interface RecordAuditEvent {
 	eventType?: 'security' | 'business';
@@ -26,6 +28,9 @@ export interface AuditEventQuery {
 	offset: number;
 }
 
+const AUDIT_CACHE_NAMESPACE = 'audit-events';
+const AUDIT_CACHE_TTL_MS = 30_000;
+
 @Injectable()
 export class AuditLogService implements OnModuleInit, OnModuleDestroy {
 	private retentionTimer?: NodeJS.Timeout;
@@ -36,6 +41,7 @@ export class AuditLogService implements OnModuleInit, OnModuleDestroy {
 		private readonly repository: Repository<AuditEvent>,
 		private readonly logger: PinoLogger,
 		private readonly config: ConfigService,
+		@NestOptional() private readonly cache?: AppCacheService,
 	) {
 		this.logger.setContext?.(AuditLogService.name);
 	}
@@ -133,9 +139,37 @@ export class AuditLogService implements OnModuleInit, OnModuleDestroy {
 			},
 			'Audit event recorded',
 		);
+		await this.cache?.invalidate(AUDIT_CACHE_NAMESPACE);
 	}
 
 	async findEvents(query: AuditEventQuery) {
+		if (!this.cache) {
+			return this._findEventsFromDB(query);
+		}
+
+		const cacheKey = AppCacheKeyBuilder.build({
+			route: '/audit/events',
+			query: {
+				eventType: query.eventType ?? '',
+				action: query.action ?? '',
+				userId: query.userId ?? '',
+				resourceType: query.resourceType ?? '',
+				resourceId: query.resourceId ?? '',
+				limit: query.limit,
+				offset: query.offset,
+			},
+		});
+
+		return this.cache.getOrSet(
+			AUDIT_CACHE_NAMESPACE,
+			cacheKey,
+			AUDIT_CACHE_TTL_MS,
+			() => this._findEventsFromDB(query),
+			(val) => val,
+		);
+	}
+
+	private async _findEventsFromDB(query: AuditEventQuery) {
 		const queryBuilder = this.repository
 			.createQueryBuilder('event')
 			.where('1 = 1')

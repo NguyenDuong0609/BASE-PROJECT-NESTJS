@@ -39,7 +39,8 @@ docs-v2/
     ├── logging.md                       # Logging
     ├── metrics.md                       # Metrics
     ├── monitoring.md                    # Monitoring
-    └── auditing.md                      # Auditing
+    ├── auditing.md                      # Auditing
+    └── redis-cache-monitoring.md        # Giám sát Redis & Cache (RedisInsight + Grafana)
 ```
 
 ## Đọc theo vai trò

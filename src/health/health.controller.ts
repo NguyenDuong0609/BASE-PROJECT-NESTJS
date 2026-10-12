@@ -39,7 +39,9 @@ export class HealthController {
 	}
 
 	@Get('ready')
-	@ApiOperation({ summary: 'Readiness check - verifies database and Redis connectivity' })
+	@ApiOperation({
+		summary: 'Readiness check - verifies database and Redis connectivity',
+	})
 	async readiness() {
 		try {
 			await Promise.all([

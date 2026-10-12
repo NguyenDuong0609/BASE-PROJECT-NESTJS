@@ -15,7 +15,7 @@ import {
 import { UserRolesService } from './user-roles.service';
 import { CreateUserRoleDto } from './dto/create-user-role.dto';
 import { UpdateUserRoleDto } from './dto/update-user-role.dto';
-import { ApiBearerAuth, ApiParam, ApiTags, ApiBody } from '@nestjs/swagger';
+import { ApiBearerAuth, ApiParam, ApiTags, ApiBody, ApiConflictResponse } from '@nestjs/swagger';
 import { JwtAccessTokenGuard } from '@modules/auth/guards/jwt-access-token.guard';
 import { RolesGuard } from '@modules/auth/guards/roles.guard';
 import { Roles } from 'src/decorators/roles.decorator';
@@ -40,6 +40,7 @@ export class UserRolesController {
 
 	@Post()
 	@ApiSuccessMessage('ROLE_CREATED')
+	@ApiConflictResponse({ description: 'Role already exists' })
 	@ApiBody({
 		type: CreateUserRoleDto,
 		examples: {
